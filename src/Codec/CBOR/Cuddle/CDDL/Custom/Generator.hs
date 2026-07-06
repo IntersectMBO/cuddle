@@ -21,9 +21,6 @@ module Codec.CBOR.Cuddle.CDDL.Custom.Generator (
   shuffle,
 
   -- * Custom generator helpers
-  antiVectorOfUnique,
-  antiVectorOfUniqueOn,
-  antiVectorOfUniqueBy,
   genArrayTerm,
   genBytesTerm,
   genStringTerm,
@@ -38,15 +35,14 @@ import Codec.CBOR.Term (Term (..))
 import Control.Monad.Reader (MonadReader (..), ReaderT (..), asks, mapReaderT)
 import Data.ByteString (ByteString)
 import Data.ByteString.Lazy qualified as LBS
-import Data.Function (on)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Text qualified as T
 import Data.Text.Lazy qualified as LT
 import GHC.Generics (Generic)
 import Optics.Lens (Lens')
-import Test.AntiGen (AntiGen, faultyBool)
-import Test.QuickCheck (Arbitrary, discard)
+import Test.AntiGen (AntiGen)
+import Test.QuickCheck (Arbitrary)
 import Test.QuickCheck qualified as QC
 import Test.QuickCheck.GenT (MonadGen (..))
 import Test.QuickCheck.GenT qualified as GenT
@@ -138,32 +134,6 @@ shuffle :: MonadGen m => [a] -> m [a]
 shuffle = liftGen . QC.shuffle
 
 -- Term generators
-
--- | Generate a list of @n@ pairwise-distinct elements. Discards the example if
--- the underlying generator could not produce enough distinct elements within
--- the per-element retry budget.
-antiVectorOfUnique :: Eq a => Int -> AntiGen a -> AntiGen [a]
-antiVectorOfUnique = antiVectorOfUniqueBy (==)
-
--- | Like 'antiVectorOfUnique', but compares elements by a key projection.
-antiVectorOfUniqueOn :: Eq b => (a -> b) -> Int -> AntiGen a -> AntiGen [a]
-antiVectorOfUniqueOn key = antiVectorOfUniqueBy ((==) `on` key)
-
--- | Like 'antiVectorOfUnique', but takes a user-supplied equivalence relation.
-antiVectorOfUniqueBy :: (a -> a -> Bool) -> Int -> AntiGen a -> AntiGen [a]
-antiVectorOfUniqueBy eq n gen = do
-  disallowDuplicates <- faultyBool True
-  let
-    triesPerElement = 10 :: Int
-    go _ 0 _ = discard
-    go m tries elems
-      | m > 0 = do
-          x <- gen
-          if disallowDuplicates && any (eq x) elems
-            then go m (tries - 1) elems
-            else go (m - 1) triesPerElement (x : elems)
-      | otherwise = pure elems
-  go n triesPerElement []
 
 genArrayTerm :: [Term] -> CBORGen Term
 genArrayTerm es =

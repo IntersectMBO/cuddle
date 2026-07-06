@@ -6,6 +6,26 @@
 
 ## 1.8.1.0
 
+* Add custom generator/validator helpers:
+  - `arbitrary` (lifted to `MonadGen`)
+  - `scale` (lifted to `MonadGen`)
+  - `shuffle` (lifted to `MonadGen`)
+  - `genArrayTerm`
+  - `genBytesTerm`
+  - `genStringTerm`
+  - `genMapTerm`
+  - `ifTwiddle`
+  - `validateInt`
+  - `validateUInt`
+  - `validateNInt`
+  - `validateArrayTerm`
+  - `validateBytesTerm`
+  - `validateStringTerm`
+  - `validateMapTerm`
+  - `validateNonEmpty`
+  - `validateUniqueList`
+  - `unwrapSingle`
+* Add `canonicalEq`
 * Fix map generator so that it does not generate duplicate keys
 * Add `MapValidationDuplicateKeys`; validator now checks for duplicate elements
 * Add `Codec.CBOR.Cuddle.CBOR.Canonical`

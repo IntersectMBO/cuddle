@@ -22,25 +22,25 @@ module Codec.CBOR.Cuddle.CDDL.Custom.Validator (
   validateStringTerm,
   validateMapTerm,
   validateNonEmpty,
-  validateUnique,
-  validateUniqueOn,
+  validateUniqueList,
   unwrapSingle,
 ) where
 
+import Codec.CBOR.Cuddle.CBOR.Canonical (toCanonical)
 import Codec.CBOR.Cuddle.CDDL (GRef (..), Name (..))
 import Codec.CBOR.Cuddle.CDDL.CTree (CTree, CTreeRoot (..), nintMin, uintMax)
 import Codec.CBOR.Cuddle.CDDL.Custom.Core (MonadCddl (..), RuleTerm (..))
 import Codec.CBOR.Cuddle.CDDL.Custom.Generator (XXCTree)
 import Codec.CBOR.Term (Term (..))
-import Control.Monad (unless)
 import Control.Monad.Reader (MonadReader (..), ReaderT (..), asks)
+import Data.Bifunctor (Bifunctor (..))
 import Data.ByteString (ByteString)
 import Data.ByteString.Lazy qualified as LBS
-import Data.Containers.ListUtils (nubOrd)
 import Data.Foldable (Foldable (..))
 import Data.List.NonEmpty (NonEmpty, nonEmpty)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
+import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Lazy qualified as LT
@@ -133,8 +133,8 @@ validateStringTerm (TStringI x) = pure $ LT.toStrict x
 validateStringTerm _ = fail "Expected string"
 
 validateMapTerm :: Term -> Validator [(Term, Term)]
-validateMapTerm (TMap xs) = pure xs
-validateMapTerm (TMapI xs) = pure xs
+validateMapTerm (TMap xs) = validateUniqueMap xs >> pure xs
+validateMapTerm (TMapI xs) = validateUniqueMap xs >> pure xs
 validateMapTerm _ = fail "Expected map"
 
 -- | Fail if the collection is empty. A custom-validator stand-in for the CDDL
@@ -143,21 +143,19 @@ validateMapTerm _ = fail "Expected map"
 validateNonEmpty :: Foldable t => t a -> Validator (NonEmpty a)
 validateNonEmpty = maybe (fail "Expected at least one element") pure . nonEmpty . toList
 
--- | Fail unless all elements of the list are pairwise distinct. Intended for
--- custom validators of CDDL sets and of map keys: once a custom validator
--- replaces the built-in array/map validation for a rule, element/key
--- uniqueness is no longer enforced automatically and has to be asserted.
-validateUnique :: Ord a => [a] -> Validator ()
-validateUnique = validateUniqueOn id
-
--- | Like 'validateUnique', but compares elements by a key projection, e.g.
--- @'validateUniqueOn' fst@ over the entries of a map.
-validateUniqueOn :: Ord b => (a -> b) -> [a] -> Validator ()
-validateUniqueOn key xs =
-  unless (length ks == length (nubOrd ks)) $
-    fail "Expected all elements to be unique"
+validateUniqueMap :: [(Term, Term)] -> Validator ()
+validateUniqueMap xs
+  | Map.size m == length xs = pure ()
+  | otherwise = fail "Map contains duplicate keys"
   where
-    ks = map key xs
+    m = Map.fromList $ first toCanonical <$> xs
+
+validateUniqueList :: [Term] -> Validator ()
+validateUniqueList xs
+  | Set.size s == length xs = pure ()
+  | otherwise = fail "List contains duplicate keys"
+  where
+    s = Set.fromList $ toCanonical <$> xs
 
 unwrapSingle :: RuleTerm -> Validator Term
 unwrapSingle (SingleTerm x) = pure x
