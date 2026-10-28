@@ -27,6 +27,7 @@ import Codec.CBOR.Term (Term (..))
 import Control.Monad (unless, void)
 import Data.ByteString qualified as BS
 import Data.ByteString.Lazy qualified as LBS
+import Data.Containers.ListUtils (nubOrdOn)
 import Data.List (nub)
 import Data.List.NonEmpty qualified as NE
 import Data.Map.Strict qualified as Map
@@ -120,7 +121,7 @@ spec = do
 
   describe "validateMapTerm" $ do
     prop "accepts definite and indefinite maps" $ \(kvs :: [(Int, Int)]) ->
-      let ts = [(TInt k, TInt v) | (k, v) <- kvs]
+      let ts = nubOrdOn fst [(TInt k, TInt v) | (k, v) <- kvs]
        in validateMapTerm (TMap ts) `succeedsWith` ts
             .&&. validateMapTerm (TMapI ts) `succeedsWith` ts
     prop "rejects non-map terms" $

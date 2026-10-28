@@ -231,8 +231,8 @@ instance Arbitrary Term where
       , TStringI . LT.pack <$> arbitrary
       , TList <$> listOf (scale (`div` 2) arbitrary)
       , TListI <$> listOf (scale (`div` 2) arbitrary)
-      , TMap <$> listOf (scale (`div` 2) $ (,) <$> arbitrary <*> arbitrary)
-      , TMapI <$> listOf (scale (`div` 2) $ (,) <$> arbitrary <*> arbitrary)
+      , TMap . nubOrdOn (toCanonical . fst) <$> listOf (scale (`div` 2) $ (,) <$> genKeyTerm <*> arbitrary)
+      , TMapI . nubOrdOn (toCanonical . fst) <$> listOf (scale (`div` 2) $ (,) <$> genKeyTerm <*> arbitrary)
       , -- TODO properly implement tagged generation
         -- , TTagged <$> arbitrary <*> arbitrary
         TBool <$> arbitrary
@@ -242,6 +242,20 @@ instance Arbitrary Term where
       , TFloat <$> arbitrary
       , TDouble <$> arbitrary
       ]
+
+genKeyTerm :: Gen Term
+genKeyTerm =
+  oneof
+    [ TInt <$> arbitrary
+    , TInteger <$> arbitrary
+    , TBytes . BS.pack <$> arbitrary
+    , TBytesI . LBS.pack <$> arbitrary
+    , TString . T.pack <$> arbitrary
+    , TStringI . LT.pack <$> arbitrary
+    , TBool <$> arbitrary
+    , pure TNull
+    , pure $ TSimple 23
+    ]
 
 genFullMap :: Gen Term
 genFullMap = do

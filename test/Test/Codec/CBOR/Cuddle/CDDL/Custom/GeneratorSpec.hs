@@ -20,6 +20,7 @@ import Codec.CBOR.Cuddle.CDDL.Custom.Validator (
  )
 import Codec.CBOR.Term (Term (..))
 import Data.ByteString qualified as BS
+import Data.Containers.ListUtils (nubOrdOn)
 import Data.List (sort)
 import Data.Map.Strict qualified as Map
 import Data.Text qualified as T
@@ -90,7 +91,7 @@ spec = do
         . classify (isIndefinite res) "indefinite"
         $ validateStringTerm res `succeedsWith` t
     prop "genMapTerm roundtrips through validateMapTerm" $ \(kvs :: [(Int, Int)]) -> do
-      let ts = [(TInt k, TInt v) | (k, v) <- kvs]
+      let ts = nubOrdOn fst [(TInt k, TInt v) | (k, v) <- kvs]
       res <- runCustomGen True $ genMapTerm ts
       pure
         . classify (isIndefinite res) "indefinite"
