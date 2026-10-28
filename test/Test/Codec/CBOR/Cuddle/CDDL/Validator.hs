@@ -1,6 +1,7 @@
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE OverloadedLists #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# OPTIONS_GHC -Wno-orphans #-}
 
 module Test.Codec.CBOR.Cuddle.CDDL.Validator (
   spec,
@@ -219,8 +220,31 @@ genBytesTerm x = elements [TBytes x, TBytesI $ LBS.fromStrict x]
 arbitraryByteString :: Gen ByteString
 arbitraryByteString = BS.pack <$> arbitrary
 
-arbitraryTerm :: Gen Term
-arbitraryTerm =
+instance Arbitrary Term where
+  arbitrary =
+    oneof
+      [ TInt <$> arbitrary
+      , TInteger <$> arbitrary
+      , TBytes . BS.pack <$> arbitrary
+      , TBytesI . LBS.pack <$> arbitrary
+      , TString . T.pack <$> arbitrary
+      , TStringI . LT.pack <$> arbitrary
+      , TList <$> listOf (scale (`div` 2) arbitrary)
+      , TListI <$> listOf (scale (`div` 2) arbitrary)
+      , TMap . nubOrdOn (toCanonical . fst) <$> listOf (scale (`div` 2) $ (,) <$> genKeyTerm <*> arbitrary)
+      , TMapI . nubOrdOn (toCanonical . fst) <$> listOf (scale (`div` 2) $ (,) <$> genKeyTerm <*> arbitrary)
+      , -- TODO properly implement tagged generation
+        -- , TTagged <$> arbitrary <*> arbitrary
+        TBool <$> arbitrary
+      , pure TNull
+      , pure $ TSimple 23 -- TODO add other values once they are supported by cuddle
+      , THalf <$> arbitrary
+      , TFloat <$> arbitrary
+      , TDouble <$> arbitrary
+      ]
+
+genKeyTerm :: Gen Term
+genKeyTerm =
   oneof
     [ TInt <$> arbitrary
     , TInteger <$> arbitrary
@@ -228,18 +252,9 @@ arbitraryTerm =
     , TBytesI . LBS.pack <$> arbitrary
     , TString . T.pack <$> arbitrary
     , TStringI . LT.pack <$> arbitrary
-    , TList <$> listOf (scale (`div` 2) arbitraryTerm)
-    , TListI <$> listOf (scale (`div` 2) arbitraryTerm)
-    , TMap <$> listOf (scale (`div` 2) $ (,) <$> arbitraryTerm <*> arbitraryTerm)
-    , TMapI <$> listOf (scale (`div` 2) $ (,) <$> arbitraryTerm <*> arbitraryTerm)
-    , -- TODO properly implement tagged generation
-      -- , TTagged <$> arbitrary <*> arbitraryTerm
-      TBool <$> arbitrary
+    , TBool <$> arbitrary
     , pure TNull
-    , pure $ TSimple 23 -- TODO add other values once they are supported by cuddle
-    , THalf <$> arbitrary
-    , TFloat <$> arbitrary
-    , TDouble <$> arbitrary
+    , pure $ TSimple 23
     ]
 
 genFullMap :: Gen Term
@@ -259,7 +274,7 @@ genFullMap = do
       <$> listOf ((,) <$> (genStringTerm . T.pack =<< arbitrary) <*> (TInt <$> arbitrary))
   bytesFields <-
     nubOrdOn (toCanonical . fst)
-      <$> listOf1 ((,) <$> (genBytesTerm =<< arbitraryByteString) <*> arbitraryTerm)
+      <$> listOf1 ((,) <$> (genBytesTerm =<< arbitraryByteString) <*> arbitrary)
   allFields <- shuffle $ field1 : lField2 <> strFields <> bytesFields
   genMapTerm allFields
 

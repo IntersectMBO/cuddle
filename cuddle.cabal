@@ -130,6 +130,8 @@ test-suite cuddle-test
   other-modules:
     Paths_cuddle
     Test.Codec.CBOR.Cuddle.CBOR.Canonical
+    Test.Codec.CBOR.Cuddle.CDDL.Custom.GeneratorSpec
+    Test.Codec.CBOR.Cuddle.CDDL.Custom.ValidatorSpec
     Test.Codec.CBOR.Cuddle.CDDL.Examples
     Test.Codec.CBOR.Cuddle.CDDL.Examples.Huddle
     Test.Codec.CBOR.Cuddle.CDDL.Gen

@@ -3,11 +3,12 @@
 module Codec.CBOR.Cuddle.CBOR.Canonical (
   CanonicalTerm (..),
   NInt,
+  toCanonical,
   toNInt,
   fromNInt,
-  toCanonical,
   uintMax,
   nintMin,
+  canonicalEq,
 ) where
 
 import Codec.CBOR.Term (Term (..))
@@ -15,6 +16,7 @@ import Data.Bifunctor (bimap)
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
 import Data.ByteString.Lazy qualified as BSL
+import Data.Function (on)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Text (Text)
@@ -153,3 +155,6 @@ uintMax = 2 ^ (64 :: Int) - 1
 
 nintMin :: Integer
 nintMin = -(2 ^ (64 :: Int))
+
+canonicalEq :: Term -> Term -> Bool
+canonicalEq = (==) `on` toCanonical

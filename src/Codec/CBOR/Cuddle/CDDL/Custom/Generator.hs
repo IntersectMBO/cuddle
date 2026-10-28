@@ -14,18 +14,38 @@ module Codec.CBOR.Cuddle.CDDL.Custom.Generator (
   withLocalGenBindings,
   disableTwiddle,
   enableTwiddle,
+
+  -- * Lifted QuickCheck functions
+  arbitrary,
+  scale,
+  shuffle,
+
+  -- * Custom generator helpers
+  genArrayTerm,
+  genBytesTerm,
+  genStringTerm,
+  genMapTerm,
+  ifTwiddle,
 ) where
 
 import Codec.CBOR.Cuddle.CDDL (GRef (..), Name (..))
 import Codec.CBOR.Cuddle.CDDL.CTree (CTree, CTreeRoot (..), XXCTree)
 import Codec.CBOR.Cuddle.CDDL.Custom.Core (MonadCddl (..), RuleTerm)
+import Codec.CBOR.Term (Term (..))
 import Control.Monad.Reader (MonadReader (..), ReaderT (..), asks, mapReaderT)
+import Data.ByteString (ByteString)
+import Data.ByteString.Lazy qualified as LBS
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
+import Data.Text qualified as T
+import Data.Text.Lazy qualified as LT
 import GHC.Generics (Generic)
 import Optics.Lens (Lens')
 import Test.AntiGen (AntiGen)
+import Test.QuickCheck (Arbitrary)
+import Test.QuickCheck qualified as QC
 import Test.QuickCheck.GenT (MonadGen (..))
+import Test.QuickCheck.GenT qualified as GenT
 
 type data GenPhase
 
@@ -101,3 +121,37 @@ data instance XXCTree GenPhase
 
 class HasGenerator a where
   generatorL :: Lens' a (Maybe (CBORGen RuleTerm))
+
+-- Lifted Gen functions
+
+arbitrary :: forall a m. (MonadGen m, Arbitrary a) => m a
+arbitrary = liftGen QC.arbitrary
+
+scale :: MonadGen m => (Int -> Int) -> m a -> m a
+scale f m = sized $ \sz -> resize (f sz) m
+
+shuffle :: MonadGen m => [a] -> m [a]
+shuffle = liftGen . QC.shuffle
+
+-- Term generators
+
+genArrayTerm :: [Term] -> CBORGen Term
+genArrayTerm es =
+  ifTwiddle (GenT.elements [TList es, TListI es]) (pure $ TList es)
+
+genBytesTerm :: ByteString -> CBORGen Term
+genBytesTerm bs =
+  ifTwiddle (GenT.elements [TBytes bs, TBytesI $ LBS.fromStrict bs]) (pure $ TBytes bs)
+
+genStringTerm :: T.Text -> CBORGen Term
+genStringTerm t =
+  ifTwiddle (GenT.elements [TString t, TStringI $ LT.fromStrict t]) (pure $ TString t)
+
+genMapTerm :: [(Term, Term)] -> CBORGen Term
+genMapTerm m =
+  ifTwiddle (GenT.elements [TMap m, TMapI m]) (pure $ TMap m)
+
+ifTwiddle :: CBORGen a -> CBORGen a -> CBORGen a
+ifTwiddle yes no = do
+  twiddle <- asks (gcTwiddle . geConfig)
+  if twiddle then yes else no
