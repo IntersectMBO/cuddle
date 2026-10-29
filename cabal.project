@@ -9,6 +9,11 @@ test-show-details: streaming
 program-options
   ghc-options: -Werror
 
+source-repository-package
+  type: git
+  location: https://github.com/IntersectMBO/antigen.git
+  tag: 904fa627b65095ebc128e9e931006fe49e30b991
+
 -- cabal-allow-newer
 if impl (ghc >= 9.14)
   allow-newer:
