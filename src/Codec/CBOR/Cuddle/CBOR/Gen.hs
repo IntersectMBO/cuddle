@@ -57,7 +57,6 @@ import Data.Char (chr)
 import Data.Functor ((<&>))
 import Data.List (sortOn)
 import Data.List.NonEmpty qualified as NE
-import Data.Map.Strict qualified as Map
 import Data.Maybe (fromMaybe)
 import Data.Ord (Down (..))
 import Data.Text (Text)
@@ -365,9 +364,9 @@ genMap nodes = do
     elemsNeeded _ = 0
 
     tryGenKV ::
-      Int -> Map.Map Term Term -> CTree GenPhase -> CTree GenPhase -> CBORGen (Maybe (Term, Term))
+      Int -> [(Term, Term)] -> CTree GenPhase -> CTree GenPhase -> CBORGen (Maybe (Term, Term))
     tryGenKV nTries m kNode vNode
-      | Map.null m = go nTries
+      | null m = go nTries
       | otherwise =
           go nTries
             ||! oneof
@@ -375,7 +374,7 @@ genMap nodes = do
               , reuseKeyValue #! "duplicateKV"
               ]
       where
-        canonicalKeys = toCanonical <$> Map.keys m
+        canonicalKeys = toCanonical . fst <$> m
         unS (SingleTerm x) = x
         unS x = error $ "Expected single, got " <> show x
         genFromNode n = unS <$> scale (`div` 2) (genForCTree n)
@@ -389,12 +388,12 @@ genMap nodes = do
                 else go (n - 1)
           | otherwise = pure Nothing
         reuseKey = do
-          k <- elements $ Map.keys m
+          k <- elements $ fst <$> m
           v <- genFromNode vNode #! "value"
           pure $ Just (k, v)
-        reuseKeyValue = Just <$> elements (Map.toList m)
+        reuseKeyValue = Just <$> elements m
 
-    genNodes :: Int -> Map.Map Term Term -> [CTree GenPhase] -> CBORGen (Maybe (Map.Map Term Term))
+    genNodes :: Int -> [(Term, Term)] -> [CTree GenPhase] -> CBORGen (Maybe [(Term, Term)])
     genNodes _ m [] = pure $ Just m
     genNodes !i !m (n : ns) =
       let
@@ -411,46 +410,41 @@ genMap nodes = do
           KV kNode vNode _ -> do
             mKV <- ann $ tryGenKV 100 m kNode vNode
             case mKV of
-              Just (k, v) -> next (Map.insert k v m) ns ||! same m ns
+              Just (k, v) -> next ((k, v) : m) ns ||! same m ns
               Nothing -> pure Nothing
           Occur kv@(KV kNode vNode _) oi -> case oi of
             OIOptional -> do
               mt <- optGenKV kNode vNode
               case mt of
-                Just (k, v) -> next (Map.insert k v m) ns
+                Just (k, v) -> next ((k, v) : m) ns
                 Nothing -> same m ns
             OIZeroOrMore -> do
               mt <- optGenKV kNode vNode
               case mt of
-                Just (k, v) -> next (Map.insert k v m) (n : ns)
+                Just (k, v) -> next ((k, v) : m) (n : ns)
                 Nothing -> same m ns
             OIOneOrMore -> genNodes i m (kv : Occur kv OIZeroOrMore : ns) ||! same m ns
             OIBounded mlb mub -> do
               sz <- fromIntegral <$> liftGen getSize
-              let lowerBound = fromMaybe 0 mlb
-              let mGenOutOfBounds =
-                    oneof
-                      <$> fmap (\lb -> [genBetween (0, lb - 1) | lb > 0]) mlb
-                        <> fmap (\ub -> [genBetween (ub + 1, max sz $ ub + 2)]) mub
-                  genInBounds = genBetween (lowerBound, fromMaybe (max lowerBound sz) mub)
               let
+                lowerBound = fromMaybe 0 mlb
+                upperBound = fromMaybe (max lowerBound sz) mub
+                outerBound = maybe upperBound (max sz . succ) mub
                 genElems i' m' nElems
                   | nElems <= 0 =
                       scale (\s -> max 0 (s - 1)) $ genNodes (i' + 1) m' ns
                   | otherwise = do
-                      mKV <- annotate (T.pack $ show i') $ tryGenKV 100 m kNode vNode
+                      mKV <- annotate (T.pack $ show i') $ tryGenKV 100 m' kNode vNode
                       case mKV of
-                        Just (k, v) -> genElems (i' + 1) (Map.insert k v m') $ nElems - 1
+                        Just (k, v) -> genElems (i' + 1) ((k, v) : m') $ nElems - 1
                         Nothing -> pure Nothing
-              nElems <- case mGenOutOfBounds of
-                Just genOutOfBounds -> genInBounds ||! genOutOfBounds
-                Nothing -> genInBounds
+              nElems <- antiChoose (lowerBound, upperBound) (0, outerBound)
               genElems i m nElems
           node -> error $ "Unexpected node: " <> showSimple node
-  mItems <- genNodes 0 Map.empty $ sortOn (Down . elemsNeeded) nodes
+  mItems <- genNodes 0 [] $ sortOn (Down . elemsNeeded) nodes
   case mItems of
     Just items -> do
-      shuffledItems <- liftGen . shuffle $ Map.toList items
+      shuffledItems <- liftGen $ shuffle items
       SingleTerm <$> twiddleMap shuffledItems
     Nothing -> error "Failed to generate unique keys for map after max retries"
 
