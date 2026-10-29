@@ -8,7 +8,6 @@ module Codec.CBOR.Cuddle.CDDL.Custom.Generator (
   HasGenerator (..),
   GenConfig (..),
   GenEnv (..),
-  liftAntiGen,
   runCBORGen,
   withAntiGen,
   withLocalGenBindings,
@@ -19,12 +18,12 @@ module Codec.CBOR.Cuddle.CDDL.Custom.Generator (
 import Codec.CBOR.Cuddle.CDDL (GRef (..), Name (..))
 import Codec.CBOR.Cuddle.CDDL.CTree (CTree, CTreeRoot (..), XXCTree)
 import Codec.CBOR.Cuddle.CDDL.Custom.Core (MonadCddl (..), RuleTerm)
-import Control.Monad.Reader (MonadReader (..), ReaderT (..), asks, mapReaderT)
+import Control.Monad.Reader (MonadReader (..), MonadTrans (..), ReaderT (..), asks, mapReaderT)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import GHC.Generics (Generic)
 import Optics.Lens (Lens')
-import Test.AntiGen (AntiGen)
+import Test.AntiGen (AntiGen, MonadAntiGen (..))
 import Test.QuickCheck.GenT (MonadGen (..))
 
 type data GenPhase
@@ -56,8 +55,9 @@ instance MonadGen CBORGen where
   resize n (CBORGen m) = CBORGen $ mapReaderT (resize n) m
   choose rng = CBORGen . ReaderT $ \_ -> choose rng
 
-liftAntiGen :: AntiGen a -> CBORGen a
-liftAntiGen m = CBORGen . ReaderT $ const m
+instance MonadAntiGen CBORGen where
+  liftAntiGen = CBORGen . lift
+  mapAntiGen f (CBORGen m) = CBORGen $ mapReaderT f m
 
 runCBORGen :: GenConfig -> CBORGen a -> AntiGen a
 runCBORGen cfg (CBORGen m) =
@@ -75,7 +75,7 @@ instance MonadCddl CBORGen where
     pure $ Map.lookup (Name t) binds
 
 withAntiGen :: (AntiGen a -> AntiGen b) -> CBORGen a -> CBORGen b
-withAntiGen f (CBORGen m) = CBORGen $ ReaderT $ \env -> f (runReaderT m env)
+withAntiGen f (CBORGen m) = CBORGen $ mapReaderT f m
 
 withTwiddle :: Bool -> CBORGen a -> CBORGen a
 withTwiddle t =
