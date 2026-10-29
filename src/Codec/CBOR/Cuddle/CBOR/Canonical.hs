@@ -15,8 +15,8 @@ import Data.Bifunctor (bimap)
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
 import Data.ByteString.Lazy qualified as BSL
-import Data.Map.Strict (Map)
-import Data.Map.Strict qualified as Map
+import Data.Set (Set)
+import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text.Lazy qualified as TL
 import Data.Word (Word64, Word8)
@@ -78,16 +78,7 @@ toCanonical = \case
   TFloat f -> CTFloat f
   TDouble d -> CTDouble d
   where
-    mkMap kvs =
-      let pairs = bimap toCanonical toCanonical <$> kvs
-          m = Map.fromList pairs
-       in if Map.size m == length pairs
-            then CTMap m
-            else
-              error
-                "toCanonical: encountered a map with duplicate keys, which is \
-                \not currently supported. Please open an issue at \
-                \https://github.com/input-output-hk/cuddle/issues"
+    mkMap kvs = CTMap . Set.fromList $ bimap toCanonical toCanonical <$> kvs
     mkList ts = CTList $ toCanonical <$> ts
     tagBytes (TBytes bs) = Just bs
     tagBytes (TBytesI bs) = Just $ BSL.toStrict bs
@@ -138,7 +129,9 @@ data CanonicalTerm
   | CTBytes !ByteString
   | CTString !Text
   | CTList ![CanonicalTerm]
-  | CTMap !(Map CanonicalTerm CanonicalTerm)
+  | -- | RFC 8949 §5.6.1: "Two maps are equal if they have the same set of pairs
+    -- regardless of their order; pairs are equal if both the key and value are equal."
+    CTMap !(Set (CanonicalTerm, CanonicalTerm))
   | CTTagged !Word64 !CanonicalTerm
   | CTSimple !Word8
   | CTHalf !Half
