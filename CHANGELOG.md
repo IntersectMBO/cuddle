@@ -1,8 +1,13 @@
 # Changelog for `cuddle`
 
-## 1.8.1.1
+## 1.9.0.0
 
-*
+* Add `TwiddleConfig` for setting a `TwiddlePolicy` for bytes, arrays, text and maps separately
+* Add `TwiddlePolicy` with `DefiniteOnly`, `IndefiniteOnly` and `DefiniteAndIndefinite`
+* Change `gcTwiddle` from `Bool` to `TwiddleConfig`
+* Add `twiddleUniform`, `twiddleAll`, `twiddleNothing` and `withTwiddle`
+* Add `isDefiniteAllowed` and `isIndefiniteAllowed`
+* Remove `enableTwiddle`
 
 ## 1.8.1.0
 
