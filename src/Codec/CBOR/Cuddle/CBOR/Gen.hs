@@ -372,6 +372,12 @@ genForCTree node = annotateTerm node $ case node of
   CTree.CTreeE (GenGenerator gen _) -> gen
   CTree.CTreeE (GenValidator _ x) -> genForCTree x
 
+isInvalidAgainstNode :: CTreeRoot GenPhase -> Term -> CTree GenPhase -> Bool
+isInvalidAgainstNode cTreeRoot term node =
+  case runValidator (validateAgainst term $ mapIndex node) (mapIndex cTreeRoot) of
+    CustomValidatorSuccess -> False
+    CustomValidatorFailure {} -> True
+
 -- | Generate a map from a list of nodes
 genMap ::
   HasCallStack => [CTree GenPhase] -> CBORGen RuleTerm
@@ -464,20 +470,16 @@ genMap nodes = do
   case mItems of
     Just items -> do
       cTreeRoot <- asks $ gcRoot . geConfig
-      let
-        isInvalidAgainstNode term node =
-          case node of
-            KV kNode _ _ ->
-              case runValidator (validateAgainst term $ mapIndex kNode) (mapIndex cTreeRoot) of
-                CustomValidatorSuccess -> False
-                CustomValidatorFailure {} -> True
-            Occur n _ -> isInvalidAgainstNode term n
-            _ -> error $ "Unexpected node when zapping: " <> showSimple node
-        keyIsInvalid term = all (isInvalidAgainstNode term) nodes
       items' <-
         pure items ||! do
-          extraKV <- (,) <$> (genTerm `suchThat` keyIsInvalid) <*> genTerm
-          pure $ extraKV : items
+          let
+            keyIsInvalidAgainstNode term = \case
+              KV kNode _ _ -> isInvalidAgainstNode cTreeRoot term kNode
+              Occur x _ -> keyIsInvalidAgainstNode term x
+              node -> error $ "Unexpected node: " <> showSimple node
+          junkKV <-
+            (,) <$> (genTerm `suchThat` \t -> all (keyIsInvalidAgainstNode t) nodes) <*> genTerm
+          pure $ junkKV : items
       shuffledItems <- liftGen $ shuffle items'
       SingleTerm <$> twiddleMap shuffledItems
     Nothing -> error "Failed to generate unique keys for map after max retries"
@@ -492,7 +494,18 @@ genArray nodes = do
         [0 :: Int ..]
         nodes
   case items of
-    Just ts -> SingleTerm <$> twiddleArray ts
+    Just ts -> do
+      cTreeRoot <- asks $ gcRoot . geConfig
+      SingleTerm
+        <$> twiddleArray ts ||! do
+          idx <- choose (0, length ts)
+          junkElem <- genTerm
+          let
+            (lInit, lTail) = splitAt idx ts
+          corruptedList <- twiddleArray $ lInit <> [junkElem] <> lTail
+          if isInvalidAgainstNode cTreeRoot corruptedList (Array nodes)
+            then pure corruptedList
+            else QC.discard
     Nothing -> error "Something weird happened which shouldn't be possible"
 
 -- | Generate a key-value pair
