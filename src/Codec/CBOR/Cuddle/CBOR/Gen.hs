@@ -141,8 +141,8 @@ suchThat gen p = go 100
     go (n :: Int)
       | n > 0 = do
           v <- gen
-          if p v then pure v else go $ succ n
-      | otherwise = QC.discard
+          if p v then pure v else go $ pred n
+      | otherwise = error "Failed to generate a fitting value after 100 tries"
 
 --------------------------------------------------------------------------------
 -- Generator infrastructure
@@ -448,7 +448,14 @@ genMap nodes = do
               case mt of
                 Just (k, v) -> next ((k, v) : m) (n : ns)
                 Nothing -> same m ns
-            OIOneOrMore -> genNodes i m (kv : Occur kv OIZeroOrMore : ns) ||! same m ns
+            OIOneOrMore ->
+              ( do
+                  mKV <- ann $ tryGenKV 100 m kNode vNode
+                  case mKV of
+                    Just (k, v) -> next ((k, v) : m) (Occur kv OIZeroOrMore : ns)
+                    Nothing -> pure Nothing
+              )
+                ||! same m ns
             OIBounded mlb mub -> do
               sz <- fromIntegral <$> liftGen getSize
               let
@@ -498,14 +505,14 @@ genArray nodes = do
       cTreeRoot <- asks $ gcRoot . geConfig
       SingleTerm
         <$> twiddleArray ts ||! do
-          idx <- choose (0, length ts)
-          junkElem <- genTerm
           let
-            (lInit, lTail) = splitAt idx ts
-          corruptedList <- twiddleArray $ lInit <> [junkElem] <> lTail
-          if isInvalidAgainstNode cTreeRoot corruptedList (Array nodes)
-            then pure corruptedList
-            else QC.discard
+            genCorruptedList = do
+              idx <- choose (0, length ts)
+              junkElem <- genTerm
+              let
+                (lInit, lTail) = splitAt idx ts
+              twiddleArray $ lInit <> [junkElem] <> lTail
+          genCorruptedList `suchThat` \l -> isInvalidAgainstNode cTreeRoot l (Array nodes)
     Nothing -> error "Something weird happened which shouldn't be possible"
 
 -- | Generate a key-value pair
