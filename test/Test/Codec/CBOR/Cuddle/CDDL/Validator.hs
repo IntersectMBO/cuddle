@@ -28,7 +28,7 @@ import Codec.CBOR.Cuddle.CDDL (Name (..))
 import Codec.CBOR.Cuddle.CDDL.CTree (CTreeRoot (..))
 import Codec.CBOR.Cuddle.CDDL.CTree qualified as CTree
 import Codec.CBOR.Cuddle.CDDL.Custom.Core (RuleTerm (..))
-import Codec.CBOR.Cuddle.CDDL.Custom.Generator (GenConfig (..), runCBORGen)
+import Codec.CBOR.Cuddle.CDDL.Custom.Generator (GenConfig (..), runCBORGen, twiddleAll)
 import Codec.CBOR.Cuddle.CDDL.Custom.Validator (TermValidator)
 import Codec.CBOR.Cuddle.CDDL.Postlude (appendPostlude)
 import Codec.CBOR.Cuddle.CDDL.Resolve (MonoReferenced, fullResolveCDDL)
@@ -119,7 +119,7 @@ genAndValidateRule description name resolvedCddl =
       genCfg =
         GenConfig
           { gcRoot = mapIndex resolvedCddl
-          , gcTwiddle = True
+          , gcTwiddle = twiddleAll
           }
     cborTerm <- runAntiGen . runCBORGen genCfg $ generateFromName name
     let
