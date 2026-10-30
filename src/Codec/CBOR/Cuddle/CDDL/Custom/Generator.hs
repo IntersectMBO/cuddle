@@ -18,6 +18,7 @@ module Codec.CBOR.Cuddle.CDDL.Custom.Generator (
 import Codec.CBOR.Cuddle.CDDL (GRef (..), Name (..))
 import Codec.CBOR.Cuddle.CDDL.CTree (CTree, CTreeRoot (..), XXCTree)
 import Codec.CBOR.Cuddle.CDDL.Custom.Core (MonadCddl (..), RuleTerm)
+import Codec.CBOR.Cuddle.CDDL.Custom.Validator (TermValidator)
 import Control.Monad.Reader (MonadReader (..), MonadTrans (..), ReaderT (..), asks, mapReaderT)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
@@ -98,6 +99,7 @@ withLocalGenBindings binds =
 data instance XXCTree GenPhase
   = GenRef Name
   | GenGenerator (CBORGen RuleTerm) (CTree GenPhase)
+  | GenValidator TermValidator (CTree GenPhase)
 
 class HasGenerator a where
   generatorL :: Lens' a (Maybe (CBORGen RuleTerm))
