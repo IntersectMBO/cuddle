@@ -11,6 +11,7 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE ViewPatterns #-}
+{-# OPTIONS_GHC -Wno-orphans #-}
 
 -- | Generate example CBOR given a CDDL specification
 module Codec.CBOR.Cuddle.CBOR.Gen (
@@ -27,6 +28,7 @@ module Codec.CBOR.Cuddle.CBOR.Gen (
 #if MIN_VERSION_random(1,3,0)
 #endif
 import Codec.CBOR.Cuddle.CBOR.Canonical (nintMin, toCanonical, uintMax)
+import Codec.CBOR.Cuddle.CBOR.Validator (validateAgainst)
 import Codec.CBOR.Cuddle.CDDL (
   GRef (..),
   Name (..),
@@ -37,7 +39,9 @@ import Codec.CBOR.Cuddle.CDDL (
  )
 import Codec.CBOR.Cuddle.CDDL.CTree (
   CTree (..),
+  CTreeRoot (..),
   PTerm (..),
+  foldCTree,
  )
 import Codec.CBOR.Cuddle.CDDL.CTree qualified as CTree
 import Codec.CBOR.Cuddle.CDDL.CtlOp qualified as CtlOp
@@ -53,7 +57,13 @@ import Codec.CBOR.Cuddle.CDDL.Custom.Generator (
   isIndefiniteAllowed,
   withTwiddle,
  )
+import Codec.CBOR.Cuddle.CDDL.Custom.Validator (
+  CustomValidatorResult (..),
+  ValidatorPhase,
+  runValidator,
+ )
 import Codec.CBOR.Cuddle.CDDL.Resolve (XXCTree (..), showSimple)
+import Codec.CBOR.Cuddle.IndexMappable (IndexMappable (..))
 import Codec.CBOR.Term (Term (..))
 import Codec.CBOR.Term qualified as CBOR
 import Codec.CBOR.Write qualified as CBOR
@@ -99,7 +109,7 @@ import Test.QuickCheck (
  )
 import Test.QuickCheck qualified as QC
 import Test.QuickCheck.Gen (Gen (..), getSize)
-import Test.QuickCheck.GenT (MonadGen (..), elements, frequency, listOf, oneof, suchThat, vectorOf)
+import Test.QuickCheck.GenT (MonadGen (..), elements, frequency, listOf, oneof, vectorOf)
 
 -- TODO remove this once QuickCheck gets QC
 data QC = QC
@@ -124,6 +134,15 @@ arbitrary = liftGen QC.arbitrary
 
 scale :: MonadGen m => (Int -> Int) -> m a -> m a
 scale f m = sized $ \n -> resize (f n) m
+
+suchThat :: Monad m => m a -> (a -> Bool) -> m a
+suchThat gen p = go 100
+  where
+    go (n :: Int)
+      | n > 0 = do
+          v <- gen
+          if p v then pure v else go $ succ n
+      | otherwise = QC.discard
 
 --------------------------------------------------------------------------------
 -- Generator infrastructure
@@ -329,6 +348,7 @@ annotateTerm = \case
   CTree.Tag {} -> annotate "tag"
   CTree.CTreeE (GenRef n) -> annotate (unName n)
   CTree.CTreeE (GenGenerator _ _) -> annotate "custom_generator"
+  CTree.CTreeE (GenValidator _ _) -> id
 
 genForCTree :: HasCallStack => CTree GenPhase -> CBORGen RuleTerm
 genForCTree node = annotateTerm node $ case node of
@@ -350,6 +370,7 @@ genForCTree node = annotateTerm node $ case node of
   CTree.Tag t n -> genTag t n
   CTree.CTreeE (GenRef n) -> genForNode n
   CTree.CTreeE (GenGenerator gen _) -> gen
+  CTree.CTreeE (GenValidator _ x) -> genForCTree x
 
 -- | Generate a map from a list of nodes
 genMap ::
@@ -442,7 +463,22 @@ genMap nodes = do
   mItems <- genNodes 0 [] $ sortOn (Down . elemsNeeded) nodes
   case mItems of
     Just items -> do
-      shuffledItems <- liftGen $ shuffle items
+      cTreeRoot <- asks $ gcRoot . geConfig
+      let
+        isInvalidAgainstNode term node =
+          case node of
+            KV kNode _ _ ->
+              case runValidator (validateAgainst term $ mapIndex kNode) (mapIndex cTreeRoot) of
+                CustomValidatorSuccess -> False
+                CustomValidatorFailure {} -> True
+            Occur n _ -> isInvalidAgainstNode term n
+            _ -> error $ "Unexpected node when zapping: " <> showSimple node
+        keyIsInvalid term = all (isInvalidAgainstNode term) nodes
+      items' <-
+        pure items ||! do
+          extraKV <- (,) <$> (genTerm `suchThat` keyIsInvalid) <*> genTerm
+          pure $ extraKV : items
+      shuffledItems <- liftGen $ shuffle items'
       SingleTerm <$> twiddleMap shuffledItems
     Nothing -> error "Failed to generate unique keys for map after max retries"
 
@@ -668,3 +704,14 @@ valueVariantToTerm (VFloat64 i) = pure $ TDouble i
 valueVariantToTerm (VText t) = twiddleText t
 valueVariantToTerm (VBytes b) = twiddleBytes b
 valueVariantToTerm (VBool b) = pure $ TBool b
+
+instance IndexMappable CTree GenPhase ValidatorPhase where
+  mapIndex = foldCTree mapExt mapIndex
+    where
+      mapExt = \case
+        GenRef n -> CTreeE $ VRuleRef n
+        GenGenerator _ x -> mapIndex x
+        GenValidator v x -> CTreeE . VValidator v $ mapIndex x
+
+instance IndexMappable CTreeRoot GenPhase ValidatorPhase where
+  mapIndex (CTreeRoot m) = CTreeRoot $ mapIndex <$> m

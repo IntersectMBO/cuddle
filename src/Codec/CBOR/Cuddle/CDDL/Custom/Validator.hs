@@ -14,9 +14,8 @@ module Codec.CBOR.Cuddle.CDDL.Custom.Validator (
 ) where
 
 import Codec.CBOR.Cuddle.CDDL (GRef (..), Name (..))
-import Codec.CBOR.Cuddle.CDDL.CTree (CTree, CTreeRoot (..))
+import Codec.CBOR.Cuddle.CDDL.CTree (CTree, CTreeRoot (..), XXCTree)
 import Codec.CBOR.Cuddle.CDDL.Custom.Core (MonadCddl (..), RuleTerm)
-import Codec.CBOR.Cuddle.CDDL.Custom.Generator (XXCTree)
 import Control.Monad.Reader (MonadReader (..), ReaderT (..), asks)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
