@@ -1,8 +1,8 @@
 # Changelog for `cuddle`
 
-## 1.8.1.1
+## 1.9.0.0
 
-*
+* Change `CTMap` to use a `Set` of pairs instead of `Map`
 
 ## 1.8.1.0
 
