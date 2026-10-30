@@ -9,9 +9,9 @@
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
-{-# LANGUAGE TypeData #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE ViewPatterns #-}
+{-# OPTIONS_GHC -Wno-orphans #-}
 
 -- | Generate example CBOR given a CDDL specification
 module Codec.CBOR.Cuddle.CBOR.Gen (
@@ -24,6 +24,7 @@ module Codec.CBOR.Cuddle.CBOR.Gen (
 #if MIN_VERSION_random(1,3,0)
 #endif
 import Codec.CBOR.Cuddle.CBOR.Canonical (nintMin, toCanonical, uintMax)
+import Codec.CBOR.Cuddle.CBOR.Validator (validateAgainst)
 import Codec.CBOR.Cuddle.CDDL (
   GRef (..),
   Name (..),
@@ -34,7 +35,9 @@ import Codec.CBOR.Cuddle.CDDL (
  )
 import Codec.CBOR.Cuddle.CDDL.CTree (
   CTree (..),
+  CTreeRoot (..),
   PTerm (..),
+  foldCTree,
  )
 import Codec.CBOR.Cuddle.CDDL.CTree qualified as CTree
 import Codec.CBOR.Cuddle.CDDL.CtlOp qualified as CtlOp
@@ -45,10 +48,14 @@ import Codec.CBOR.Cuddle.CDDL.Custom.Generator (
   GenEnv (..),
   GenPhase,
   disableTwiddle,
-  liftAntiGen,
-  withAntiGen,
+ )
+import Codec.CBOR.Cuddle.CDDL.Custom.Validator (
+  CustomValidatorResult (..),
+  ValidatorPhase,
+  runValidator,
  )
 import Codec.CBOR.Cuddle.CDDL.Resolve (XXCTree (..), showSimple)
+import Codec.CBOR.Cuddle.IndexMappable (IndexMappable (..))
 import Codec.CBOR.Term (Term (..))
 import Codec.CBOR.Term qualified as CBOR
 import Codec.CBOR.Write qualified as CBOR
@@ -60,7 +67,6 @@ import Data.Char (chr)
 import Data.Functor ((<&>))
 import Data.List (sortOn)
 import Data.List.NonEmpty qualified as NE
-import Data.Map.Strict qualified as Map
 import Data.Maybe (fromMaybe)
 import Data.Ord (Down (..))
 import Data.Text (Text)
@@ -77,22 +83,25 @@ import Prettyprinter (Pretty (..), layoutCompact)
 import Prettyprinter.Render.Text (renderStrict)
 import System.Random.Stateful (Random, StatefulGen (..), runStateGen_, uniformByteStringM)
 import Test.AntiGen (
-  AntiGen,
+  MonadAntiGen (..),
+  annotate,
   antiChoose,
   faultyBool,
   faultyNum,
   reweigh,
   runAntiGen,
-  withAnnotation,
+  (#!),
   (|!),
+  (||!),
  )
 import Test.QuickCheck (
   Arbitrary,
   NonNegative (..),
+  shuffle,
  )
 import Test.QuickCheck qualified as QC
 import Test.QuickCheck.Gen (Gen (..), getSize)
-import Test.QuickCheck.GenT (MonadGen (..), elements, frequency, listOf, oneof, suchThat, vectorOf)
+import Test.QuickCheck.GenT (MonadGen (..), elements, frequency, listOf, oneof, vectorOf)
 
 -- TODO remove this once QuickCheck gets QC
 data QC = QC
@@ -117,6 +126,15 @@ arbitrary = liftGen QC.arbitrary
 
 scale :: MonadGen m => (Int -> Int) -> m a -> m a
 scale f m = sized $ \n -> resize (f n) m
+
+suchThat :: Monad m => m a -> (a -> Bool) -> m a
+suchThat gen p = go 100
+  where
+    go (n :: Int)
+      | n > 0 = do
+          v <- gen
+          if p v then pure v else go $ pred n
+      | otherwise = error "Failed to generate a fitting value after 100 tries"
 
 --------------------------------------------------------------------------------
 -- Generator infrastructure
@@ -225,7 +243,7 @@ genText = sized $ \sz -> genNBytesText =<< choose (0, sz)
 
 -- | Primitive types defined by the CDDL specification, with their generators
 genPostlude :: PTerm -> CBORGen Term
-genPostlude pt = genPTerm =<< liftAntiGen (faultyPTerm pt)
+genPostlude pt = genPTerm =<< faultyPTerm pt
   where
     genExcluding ls =
       elements (filter (`notElem` ls) [minBound .. maxBound])
@@ -248,8 +266,8 @@ genPostlude pt = genPTerm =<< liftAntiGen (faultyPTerm pt)
       PTBool -> TBool <$> arbitrary
       -- For integers, introduce decision points that sometimes generate
       -- out-of-bounds values
-      PTUInt -> TInteger <$> liftAntiGen (genUInt |! oneof [genNInt, genBelowNInt, genAboveUInt])
-      PTNInt -> TInteger <$> liftAntiGen (genNInt |! oneof [genUInt, genBelowNInt, genAboveUInt])
+      PTUInt -> TInteger <$> genUInt |! oneof [genNInt, genBelowNInt, genAboveUInt]
+      PTNInt -> TInteger <$> genNInt |! oneof [genUInt, genBelowNInt, genAboveUInt]
       PTInt -> TInteger <$> choose (nintMin, uintMax)
       PTHalf -> THalf <$> genHalf
       PTFloat -> TFloat <$> arbitrary
@@ -281,8 +299,8 @@ singleTermList (PairTerm _ y : xs) = (y :) <$> singleTermList xs
 singleTermList _ = Nothing
 
 -- | Remove all negative generators from the `AntiGen`.
-dropNegativeGen :: AntiGen a -> AntiGen a
-dropNegativeGen = liftGen . runAntiGen
+dropNegativeGen :: MonadAntiGen m => m a -> m a
+dropNegativeGen = mapAntiGen $ liftGen . runAntiGen
 
 --------------------------------------------------------------------------------
 -- Generator functions
@@ -299,16 +317,19 @@ range :: Enum a => RangeBound -> a -> a -> (a, a)
 range ClOpen x y = (x, pred y)
 range Closed x y = (x, y)
 
-genBetween :: (Integral a, Random a) => (a, a) -> CBORGen a
-genBetween rng = liftAntiGen $ do
+genBetween ::
+  ( Integral a
+  , Random a
+  , MonadAntiGen m
+  , MonadGen m
+  ) =>
+  (a, a) -> m a
+genBetween rng = do
   size <- liftGen getSize
   let
     sizeBounds :: Integral a => (a, a)
     sizeBounds = (0, fromIntegral size)
   antiChoose rng sizeBounds
-
-annotate :: Text -> CBORGen b -> CBORGen b
-annotate ann = withAntiGen $ withAnnotation ann
 
 -- | Annotate a generator with the label derived from a CTree node.
 -- Control nodes are transparent — the annotation comes from the target inside.
@@ -329,6 +350,7 @@ annotateTerm = \case
   CTree.Tag {} -> annotate "tag"
   CTree.CTreeE (GenRef n) -> annotate (unName n)
   CTree.CTreeE (GenGenerator _ _) -> annotate "custom_generator"
+  CTree.CTreeE (GenValidator _ _) -> id
 
 genForCTree :: HasCallStack => CTree GenPhase -> CBORGen RuleTerm
 genForCTree node = annotateTerm node $ case node of
@@ -350,6 +372,13 @@ genForCTree node = annotateTerm node $ case node of
   CTree.Tag t n -> genTag t n
   CTree.CTreeE (GenRef n) -> genForNode n
   CTree.CTreeE (GenGenerator gen _) -> gen
+  CTree.CTreeE (GenValidator _ x) -> genForCTree x
+
+isInvalidAgainstNode :: CTreeRoot GenPhase -> Term -> CTree GenPhase -> Bool
+isInvalidAgainstNode cTreeRoot term node =
+  case runValidator (validateAgainst term $ mapIndex node) (mapIndex cTreeRoot) of
+    CustomValidatorSuccess -> False
+    CustomValidatorFailure {} -> True
 
 -- | Generate a map from a list of nodes
 genMap ::
@@ -362,27 +391,41 @@ genMap nodes = do
     elemsNeeded _ = 0
 
     tryGenKV ::
-      Int -> Map.Map Term a -> CTree GenPhase -> CTree GenPhase -> CBORGen (Maybe (Term, Term))
-    tryGenKV nTries m kNode vNode = go nTries
+      Int -> [(Term, Term)] -> CTree GenPhase -> CTree GenPhase -> CBORGen (Maybe (Term, Term))
+    tryGenKV nTries m kNode vNode
+      | null m = go nTries
+      | otherwise =
+          go nTries
+            ||! oneof
+              [ reuseKey #! "duplicateKey"
+              , reuseKeyValue #! "duplicateKV"
+              ]
       where
-        canonicalKeys = toCanonical <$> Map.keys m
+        canonicalKeys = toCanonical . fst <$> m
         unS (SingleTerm x) = x
         unS x = error $ "Expected single, got " <> show x
+        genFromNode n = unS <$> scale (`div` 2) (genForCTree n)
         go !n
           | n > 0 = do
-              k <- unS <$> scale (`div` 2) (withAntiGen (withAnnotation "key") $ genForCTree kNode)
+              k <- genFromNode kNode #! "key"
               if toCanonical k `notElem` canonicalKeys
                 then do
-                  v <- unS <$> scale (`div` 2) (withAntiGen (withAnnotation "value") $ genForCTree vNode)
+                  v <- genFromNode vNode #! "value"
                   pure $ Just (k, v)
                 else go (n - 1)
           | otherwise = pure Nothing
+        reuseKey = do
+          k <- elements $ fst <$> m
+          v <- genFromNode vNode #! "value"
+          pure $ Just (k, v)
+        reuseKeyValue = Just <$> elements m
 
-    genNodes :: Int -> Map.Map Term Term -> [CTree GenPhase] -> CBORGen (Maybe (Map.Map Term Term))
+    genNodes :: Int -> [(Term, Term)] -> [CTree GenPhase] -> CBORGen (Maybe [(Term, Term)])
     genNodes _ m [] = pure $ Just m
     genNodes !i !m (n : ns) =
       let
-        ann = withAntiGen (withAnnotation (T.pack $ show i))
+        ann :: CBORGen a -> CBORGen a
+        ann = annotate (T.pack $ show i)
         -- A term was produced, advance the index
         next x y = scale (\s -> max 0 (s - 1)) $ genNodes (i + 1) x y
         -- No term was produced, keep the index
@@ -394,39 +437,60 @@ genMap nodes = do
           KV kNode vNode _ -> do
             mKV <- ann $ tryGenKV 100 m kNode vNode
             case mKV of
-              Just (k, v) -> next (Map.insert k v m) ns
+              Just (k, v) -> next ((k, v) : m) ns ||! same m ns
               Nothing -> pure Nothing
           Occur kv@(KV kNode vNode _) oi -> case oi of
             OIOptional -> do
               mt <- optGenKV kNode vNode
               case mt of
-                Just (k, v) -> next (Map.insert k v m) ns
+                Just (k, v) -> next ((k, v) : m) ns
                 Nothing -> same m ns
             OIZeroOrMore -> do
               mt <- optGenKV kNode vNode
               case mt of
-                Just (k, v) -> next (Map.insert k v m) (n : ns)
+                Just (k, v) -> next ((k, v) : m) (n : ns)
                 Nothing -> same m ns
-            OIOneOrMore -> genNodes i m (kv : Occur kv OIZeroOrMore : ns)
+            OIOneOrMore ->
+              ( do
+                  mKV <- ann $ tryGenKV 100 m kNode vNode
+                  case mKV of
+                    Just (k, v) -> next ((k, v) : m) (Occur kv OIZeroOrMore : ns)
+                    Nothing -> pure Nothing
+              )
+                ||! same m ns
             OIBounded mlb mub -> do
+              sz <- fromIntegral <$> liftGen getSize
               let
-                clampedPred 0 = 0
-                clampedPred x = x - 1
-                newLow = clampedPred <$> mlb
-                newHigh = clampedPred <$> mub
-                res
-                  | maybe False (> 0) mlb = genNodes i m (kv : Occur kv (OIBounded newLow newHigh) : ns)
-                  | maybe False (< 1) mub = same m ns
+                lowerBound = fromMaybe 0 mlb
+                upperBound = fromMaybe (max lowerBound sz) mub
+                outerBound = maybe upperBound (max sz . succ) mub
+                genElems i' m' nElems
+                  | nElems <= 0 =
+                      scale (\s -> max 0 (s - 1)) $ genNodes (i' + 1) m' ns
                   | otherwise = do
-                      mt <- optGenKV kNode vNode
-                      case mt of
-                        Just (k, v) -> next (Map.insert k v m) (Occur kv (OIBounded newLow newHigh) : ns)
-                        Nothing -> same m ns
-              res
+                      mKV <- annotate (T.pack $ show i') $ tryGenKV 100 m' kNode vNode
+                      case mKV of
+                        Just (k, v) -> genElems (i' + 1) ((k, v) : m') $ nElems - 1
+                        Nothing -> pure Nothing
+              nElems <- antiChoose (lowerBound, upperBound) (0, outerBound)
+              genElems i m nElems
           node -> error $ "Unexpected node: " <> showSimple node
-  mItems <- genNodes 0 Map.empty $ sortOn (Down . elemsNeeded) nodes
+  mItems <- genNodes 0 [] $ sortOn (Down . elemsNeeded) nodes
   case mItems of
-    Just items -> SingleTerm <$> twiddleMap (Map.toList items)
+    Just items -> do
+      cTreeRoot <- asks $ gcRoot . geConfig
+      items' <-
+        pure items ||! do
+          let
+            keyIsInvalidAgainstNode term = \case
+              KV kNode _ _ -> isInvalidAgainstNode cTreeRoot term kNode
+              Occur x _ -> keyIsInvalidAgainstNode term x
+              node -> error $ "Unexpected node: " <> showSimple node
+          junkKV <-
+            (,) <$> (genTerm `suchThat` \t -> all (keyIsInvalidAgainstNode t) nodes) <*> genTerm
+          pure $ junkKV : items
+      shuffledItems <- liftGen $ shuffle items'
+      SingleTerm <$> twiddleMap shuffledItems
     Nothing -> error "Failed to generate unique keys for map after max retries"
 
 -- | Generate an array from a list of nodes
@@ -435,18 +499,29 @@ genArray nodes = do
   items <-
     singleTermList . flattenWrappedList
       <$> zipWithM
-        (\i node -> withAntiGen (withAnnotation (T.pack $ show i)) $ genForCTree node)
+        (\i node -> annotate (T.pack $ show i) $ genForCTree node)
         [0 :: Int ..]
         nodes
   case items of
-    Just ts -> SingleTerm <$> twiddleList ts
+    Just ts -> do
+      cTreeRoot <- asks $ gcRoot . geConfig
+      SingleTerm
+        <$> twiddleList ts ||! do
+          let
+            genCorruptedList = do
+              idx <- choose (0, length ts)
+              junkElem <- genTerm
+              let
+                (lInit, lTail) = splitAt idx ts
+              twiddleList $ lInit <> [junkElem] <> lTail
+          genCorruptedList `suchThat` \l -> isInvalidAgainstNode cTreeRoot l (Array nodes)
     Nothing -> error "Something weird happened which shouldn't be possible"
 
 -- | Generate a key-value pair
 genKV :: HasCallStack => CTree GenPhase -> CTree GenPhase -> CBORGen RuleTerm
 genKV key value = do
-  kg <- withAntiGen (withAnnotation "key") $ genForCTree key
-  vg <- withAntiGen (withAnnotation "value") $ genForCTree value
+  kg <- annotate "key" $ genForCTree key
+  vg <- annotate "value" $ genForCTree value
   case (kg, vg) of
     (SingleTerm k, SingleTerm v) -> pure $ PairTerm k v
     _ ->
@@ -464,8 +539,8 @@ genRange ::
   RangeBound ->
   CBORGen RuleTerm
 genRange from to bounds = do
-  term1 <- withAntiGen dropNegativeGen $ genForCTree from
-  term2 <- withAntiGen dropNegativeGen $ genForCTree to
+  term1 <- dropNegativeGen $ genForCTree from
+  term2 <- dropNegativeGen $ genForCTree to
   case (term1, term2) of
     (SingleTerm (TInt a), SingleTerm (TInt b))
       | a <= b -> genBetween (range bounds a b) <&> SingleTerm . TInt
@@ -491,7 +566,7 @@ genControl ::
   CBORGen RuleTerm
 genControl op target controller = annotateTerm target $ do
   resolvedController <- case controller of
-    CTreeE (GenRef n) -> withAntiGen dropNegativeGen $ resolveRef n
+    CTreeE (GenRef n) -> dropNegativeGen $ resolveRef n
     x -> pure x
   case (op, resolvedController) of
     (CtlOp.Le, CTree.Literal (Value (VUInt n) _)) -> case target of
@@ -503,12 +578,12 @@ genControl op target controller = annotateTerm target $ do
       _ -> error "Cannot apply lt operator to target"
     (CtlOp.Lt, _) -> error $ "Invalid controller for .lt operator: " <> showSimple controller
     (CtlOp.Size, CTree.Literal (Value (VUInt s) _)) -> do
-      s' <- liftAntiGen $ pure s |! sized (\sz -> choose (0, fromIntegral sz) `suchThat` (/= s))
+      s' <- pure s |! sized (\sz -> choose (0, fromIntegral sz) `suchThat` (/= s))
       genSized s' target
     (CtlOp.Size, CTree.Range {CTree.from, CTree.to}) ->
       case (from, to) of
         (CTree.Literal (Value (VUInt f) _), CTree.Literal (Value (VUInt t) _)) -> do
-          s <- liftAntiGen $ sized $ \sz ->
+          s <- sized $ \sz ->
             antiChoose
               (fromIntegral f, fromIntegral t)
               (0, max (succ t) $ fromIntegral sz)
@@ -539,11 +614,11 @@ genEnum tree = case tree of
 -- | Generate a tagged value
 genTag :: HasCallStack => Word64 -> CTree GenPhase -> CBORGen RuleTerm
 genTag t node = do
-  omitTag <- liftAntiGen $ faultyBool False
+  omitTag <- faultyBool False
   if omitTag
     then genForCTree node
     else do
-      tag <- liftAntiGen $ faultyNum t
+      tag <- faultyNum t
       enc <- case tag of
         n
           | n == 2 || n == 3 ->
@@ -608,7 +683,7 @@ listOfScaled g = sized $ \sz -> do
   i <- choose (0, sz)
   vectorOf i $ scale (`div` (i + 1)) g
 
-listOfScaled1 :: AntiGen a -> AntiGen [a]
+listOfScaled1 :: (MonadGen m, MonadAntiGen m) => m a -> m [a]
 listOfScaled1 g = sized $ \sz -> do
   i <- choose (1, max sz 1) |! pure 0
   vectorOf i $ scale (`div` (i + 1)) g
@@ -625,7 +700,7 @@ applyOccurenceIndicator OIOptional oldGen =
 applyOccurenceIndicator OIZeroOrMore oldGen =
   GroupTerm <$> listOfScaled oldGen
 applyOccurenceIndicator OIOneOrMore oldGen =
-  withAntiGen (fmap GroupTerm . listOfScaled1) oldGen
+  GroupTerm <$> listOfScaled1 oldGen
 applyOccurenceIndicator (OIBounded mlb mub) oldGen =
   sized $ \sz -> do
     let
@@ -651,3 +726,14 @@ valueVariantToTerm (VFloat64 i) = pure $ TDouble i
 valueVariantToTerm (VText t) = twiddleString t
 valueVariantToTerm (VBytes b) = twiddleBytes b
 valueVariantToTerm (VBool b) = pure $ TBool b
+
+instance IndexMappable CTree GenPhase ValidatorPhase where
+  mapIndex = foldCTree mapExt mapIndex
+    where
+      mapExt = \case
+        GenRef n -> CTreeE $ VRuleRef n
+        GenGenerator _ x -> mapIndex x
+        GenValidator v x -> CTreeE . VValidator v $ mapIndex x
+
+instance IndexMappable CTreeRoot GenPhase ValidatorPhase where
+  mapIndex (CTreeRoot m) = CTreeRoot $ mapIndex <$> m

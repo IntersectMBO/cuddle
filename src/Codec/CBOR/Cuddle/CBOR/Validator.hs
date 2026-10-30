@@ -7,6 +7,7 @@ module Codec.CBOR.Cuddle.CBOR.Validator (
   validateCBOR,
   validateFromName,
   validateFromGRef,
+  validateAgainst,
   ValidatorPhase,
   ValidateCBORError (..),
 ) where
