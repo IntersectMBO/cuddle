@@ -9,7 +9,6 @@
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
-{-# LANGUAGE TypeData #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE ViewPatterns #-}
 
@@ -44,9 +43,13 @@ import Codec.CBOR.Cuddle.CDDL.Custom.Generator (
   GenConfig (..),
   GenEnv (..),
   GenPhase,
-  disableTwiddle,
+  TwiddleConfig (..),
+  TwiddlePolicy (..),
+  isDefiniteAllowed,
+  isIndefiniteAllowed,
   liftAntiGen,
   withAntiGen,
+  withTwiddle,
  )
 import Codec.CBOR.Cuddle.CDDL.Resolve (XXCTree (..), showSimple)
 import Codec.CBOR.Term (Term (..))
@@ -140,33 +143,23 @@ genHalf = do
     then genHalf
     else pure $ fromHalf half
 
-twiddleString :: Text -> CBORGen Term
-twiddleString t = do
-  twiddle <- asks (gcTwiddle . geConfig)
-  if twiddle
-    then ($ t) <$> elements [TString, TStringI . TL.fromStrict]
-    else pure $ TString t
+genTwiddled :: (TwiddleConfig -> TwiddlePolicy) -> (a -> Term) -> (a -> Term) -> a -> CBORGen Term
+genTwiddled getPolicy definite indefinite term = do
+  policy <- asks $ getPolicy . gcTwiddle . geConfig
+  elements $
+    [definite term | isDefiniteAllowed policy] <> [indefinite term | isIndefiniteAllowed policy]
 
 twiddleList :: [Term] -> CBORGen Term
-twiddleList t = do
-  twiddle <- asks (gcTwiddle . geConfig)
-  if twiddle
-    then ($ t) <$> elements [TList, TListI]
-    else pure $ TList t
-
-twiddleBytes :: ByteString -> CBORGen Term
-twiddleBytes t = do
-  twiddle <- asks (gcTwiddle . geConfig)
-  if twiddle
-    then ($ t) <$> elements [TBytes, TBytesI . LBS.fromStrict]
-    else pure $ TBytes t
+twiddleList = genTwiddled tcArrays TList TListI
 
 twiddleMap :: [(Term, Term)] -> CBORGen Term
-twiddleMap t = do
-  twiddle <- asks (gcTwiddle . geConfig)
-  if twiddle
-    then ($ t) <$> elements [TMap, TMapI]
-    else pure $ TMap t
+twiddleMap = genTwiddled tcMaps TMap TMapI
+
+twiddleString :: Text -> CBORGen Term
+twiddleString = genTwiddled tcText TString (TStringI . TL.fromStrict)
+
+twiddleBytes :: ByteString -> CBORGen Term
+twiddleBytes = genTwiddled tcBytes TBytes (TBytesI . LBS.fromStrict)
 
 genTerm :: CBORGen Term
 genTerm =
@@ -548,7 +541,7 @@ genTag t node = do
         n
           | n == 2 || n == 3 ->
               -- TODO remove this once `cborg` can decode indefinite bytes in bignums
-              disableTwiddle $ genForCTree node
+              withTwiddle (\c -> c {tcBytes = DefiniteOnly}) $ genForCTree node
         _ -> genForCTree node
       case enc of
         SingleTerm x -> pure $ SingleTerm $ TTagged tag x

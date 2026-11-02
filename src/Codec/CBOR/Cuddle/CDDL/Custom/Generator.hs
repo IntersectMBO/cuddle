@@ -12,8 +12,17 @@ module Codec.CBOR.Cuddle.CDDL.Custom.Generator (
   runCBORGen,
   withAntiGen,
   withLocalGenBindings,
+
+  -- * Twiddling
+  TwiddleConfig (..),
+  TwiddlePolicy (..),
+  isIndefiniteAllowed,
+  isDefiniteAllowed,
+  twiddleUniform,
+  twiddleAll,
+  twiddleNothing,
+  withTwiddle,
   disableTwiddle,
-  enableTwiddle,
 ) where
 
 import Codec.CBOR.Cuddle.CDDL (GRef (..), Name (..))
@@ -29,11 +38,47 @@ import Test.QuickCheck.GenT (MonadGen (..))
 
 type data GenPhase
 
--- | User-supplied configuration for the generator monad. Set once at the
--- top level when calling 'runCBORGen'.
+data TwiddlePolicy
+  = DefiniteOnly
+  | IndefiniteOnly
+  | DefiniteAndIndefinite
+  deriving (Generic, Show, Eq, Ord, Enum)
+
+isDefiniteAllowed :: TwiddlePolicy -> Bool
+isDefiniteAllowed IndefiniteOnly = False
+isDefiniteAllowed _ = True
+
+isIndefiniteAllowed :: TwiddlePolicy -> Bool
+isIndefiniteAllowed DefiniteOnly = False
+isIndefiniteAllowed _ = True
+
+data TwiddleConfig = TwiddleConfig
+  { tcBytes :: !TwiddlePolicy
+  , tcArrays :: !TwiddlePolicy
+  , tcText :: !TwiddlePolicy
+  , tcMaps :: !TwiddlePolicy
+  }
+  deriving (Generic, Show, Eq, Ord)
+
+twiddleUniform :: TwiddlePolicy -> TwiddleConfig
+twiddleUniform policy =
+  TwiddleConfig
+    { tcBytes = policy
+    , tcArrays = policy
+    , tcText = policy
+    , tcMaps = policy
+    }
+
+twiddleAll :: TwiddleConfig
+twiddleAll = twiddleUniform DefiniteAndIndefinite
+
+twiddleNothing :: TwiddleConfig
+twiddleNothing = twiddleUniform DefiniteOnly
+
+-- | User-supplied configuration for the generator monad.
 data GenConfig = GenConfig
   { gcRoot :: CTreeRoot GenPhase
-  , gcTwiddle :: !Bool
+  , gcTwiddle :: !TwiddleConfig
   }
   deriving (Generic)
 
@@ -77,15 +122,20 @@ instance MonadCddl CBORGen where
 withAntiGen :: (AntiGen a -> AntiGen b) -> CBORGen a -> CBORGen b
 withAntiGen f (CBORGen m) = CBORGen $ ReaderT $ \env -> f (runReaderT m env)
 
-withTwiddle :: Bool -> CBORGen a -> CBORGen a
-withTwiddle t =
-  local (\env -> env {geConfig = (geConfig env) {gcTwiddle = t}})
+withTwiddle :: (TwiddleConfig -> TwiddleConfig) -> CBORGen a -> CBORGen a
+withTwiddle f =
+  local
+    ( \env ->
+        env
+          { geConfig =
+              (geConfig env)
+                { gcTwiddle = f (gcTwiddle $ geConfig env)
+                }
+          }
+    )
 
 disableTwiddle :: CBORGen a -> CBORGen a
-disableTwiddle = withTwiddle False
-
-enableTwiddle :: CBORGen a -> CBORGen a
-enableTwiddle = withTwiddle True
+disableTwiddle = withTwiddle $ const twiddleNothing
 
 -- | Run an action with the given local generic bindings installed.
 -- Used to wrap custom generators attached to generic rules so that

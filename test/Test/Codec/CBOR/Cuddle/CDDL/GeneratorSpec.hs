@@ -7,7 +7,7 @@ module Test.Codec.CBOR.Cuddle.CDDL.GeneratorSpec (spec) where
 import Codec.CBOR.Cuddle.CBOR.Gen (GenPhase, generateFromName)
 import Codec.CBOR.Cuddle.CDDL (Name)
 import Codec.CBOR.Cuddle.CDDL.CTree (CTreeRoot (..))
-import Codec.CBOR.Cuddle.CDDL.Custom.Generator (GenConfig (..), runCBORGen)
+import Codec.CBOR.Cuddle.CDDL.Custom.Generator (GenConfig (..), runCBORGen, twiddleAll)
 import Codec.CBOR.Cuddle.CDDL.Resolve (MonoReferenced, MonoSimplePhase, fullResolveCDDL)
 import Codec.CBOR.Cuddle.Huddle (Huddle, toCDDL)
 import Codec.CBOR.Cuddle.IndexMappable (IndexMappable (..), mapCDDLDropExt)
@@ -45,7 +45,7 @@ generateCDDL cddl = runAntiGen . runCBORGen cfg $ generateFromName "root"
     cfg =
       GenConfig
         { gcRoot = cddl
-        , gcTwiddle = True
+        , gcTwiddle = twiddleAll
         }
 
 tryResolveHuddle :: HasCallStack => Huddle -> SpecM () (CTreeRoot MonoReferenced)
@@ -60,7 +60,7 @@ expectZapInvalidates cddl name = property $ do
     cfg =
       GenConfig
         { gcRoot = mapIndex cddl
-        , gcTwiddle = True
+        , gcTwiddle = twiddleAll
         }
   res@ZapResult {zrValue} <- zapAntiGenResult 1 . runCBORGen cfg $ generateFromName name
   let
@@ -160,7 +160,7 @@ spec = do
     let cfg =
           GenConfig
             { gcRoot = mapIndex taggedBytesCddl
-            , gcTwiddle = True
+            , gcTwiddle = twiddleAll
             }
     prop "labels zapped result" $ do
       ZapResult {zrValue} <-

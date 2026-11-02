@@ -16,7 +16,12 @@ import Codec.CBOR.Cuddle.CBOR.Validator.Trace (
  )
 import Codec.CBOR.Cuddle.CDDL (CDDL, Name (..), fromRules, sortCDDL)
 import Codec.CBOR.Cuddle.CDDL.CTree (CTreeRoot)
-import Codec.CBOR.Cuddle.CDDL.Custom.Generator (GenConfig (..), runCBORGen)
+import Codec.CBOR.Cuddle.CDDL.Custom.Generator (
+  GenConfig (..),
+  runCBORGen,
+  twiddleAll,
+  twiddleNothing,
+ )
 import Codec.CBOR.Cuddle.CDDL.Postlude (appendPostlude)
 import Codec.CBOR.Cuddle.CDDL.Resolve (
   fullResolveCDDL,
@@ -401,7 +406,7 @@ run = \case
           cfg =
             GenConfig
               { gcRoot = mapIndex mt
-              , gcTwiddle = goTwiddle
+              , gcTwiddle = if goTwiddle then twiddleAll else twiddleNothing
               }
           term = runGen seed goSize . zapAntiGen zapN . runCBORGen cfg $ generateFromName (Name itemName)
           formatted = formatTerm term outputFormat
