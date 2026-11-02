@@ -18,6 +18,10 @@ module Codec.CBOR.Cuddle.CBOR.Gen (
   generateFromGRef,
   GenPhase,
   XXCTree (..),
+  twiddleArray,
+  twiddleMap,
+  twiddleText,
+  twiddleBytes,
 ) where
 
 #if MIN_VERSION_random(1,3,0)
@@ -149,14 +153,14 @@ genTwiddled getPolicy definite indefinite term = do
   elements $
     [definite term | isDefiniteAllowed policy] <> [indefinite term | isIndefiniteAllowed policy]
 
-twiddleList :: [Term] -> CBORGen Term
-twiddleList = genTwiddled tcArrays TList TListI
+twiddleArray :: [Term] -> CBORGen Term
+twiddleArray = genTwiddled tcArrays TList TListI
 
 twiddleMap :: [(Term, Term)] -> CBORGen Term
 twiddleMap = genTwiddled tcMaps TMap TMapI
 
-twiddleString :: Text -> CBORGen Term
-twiddleString = genTwiddled tcText TString (TStringI . TL.fromStrict)
+twiddleText :: Text -> CBORGen Term
+twiddleText = genTwiddled tcText TString (TStringI . TL.fromStrict)
 
 twiddleBytes :: ByteString -> CBORGen Term
 twiddleBytes = genTwiddled tcBytes TBytes (TBytesI . LBS.fromStrict)
@@ -171,8 +175,8 @@ genTerm =
           , choose (negate (toInteger (maxBound :: Word64)), toInteger (minBound :: Int) - 1)
           ]
     , twiddleBytes =<< genNBytes . getNonNegative =<< arbitrary
-    , twiddleString . T.pack =<< arbitrary
-    , twiddleList =<< listOf smallerTerm
+    , twiddleText . T.pack =<< arbitrary
+    , twiddleArray =<< listOf smallerTerm
     , twiddleMap =<< listOf ((,) <$> smallerTerm <*> smallerTerm)
     , TTagged <$> choose (6, maxBound :: Word64) <*> smallerTerm
     , TBool <$> arbitrary
@@ -248,7 +252,7 @@ genPostlude pt = genPTerm =<< liftAntiGen (faultyPTerm pt)
       PTFloat -> TFloat <$> arbitrary
       PTDouble -> TDouble <$> arbitrary
       PTBytes -> twiddleBytes =<< genBytes
-      PTText -> twiddleString =<< genText
+      PTText -> twiddleText =<< genText
       PTAny -> genTerm
       PTNil -> pure TNull
       PTUndefined -> pure $ TSimple 23
@@ -283,7 +287,7 @@ dropNegativeGen = liftGen . runAntiGen
 
 genSized :: HasCallStack => Word64 -> CTree GenPhase -> CBORGen RuleTerm
 genSized s target = annotateTerm target $ case target of
-  CTree.Postlude PTText -> fmap SingleTerm . twiddleString =<< genNBytesText (fromIntegral s)
+  CTree.Postlude PTText -> fmap SingleTerm . twiddleText =<< genNBytesText (fromIntegral s)
   CTree.Postlude PTBytes -> fmap SingleTerm . twiddleBytes =<< genNBytes (fromIntegral s)
   CTree.Postlude PTUInt -> SingleTerm . TInteger <$> choose (0, 256 ^ s - 1)
   _ -> error "Cannot apply size operator to target "
@@ -432,7 +436,7 @@ genArray nodes = do
         [0 :: Int ..]
         nodes
   case items of
-    Just ts -> SingleTerm <$> twiddleList ts
+    Just ts -> SingleTerm <$> twiddleArray ts
     Nothing -> error "Something weird happened which shouldn't be possible"
 
 -- | Generate a key-value pair
@@ -641,6 +645,6 @@ valueVariantToTerm (VBignum i) = pure $ TInteger i
 valueVariantToTerm (VFloat16 i) = pure $ THalf i
 valueVariantToTerm (VFloat32 i) = pure $ TFloat i
 valueVariantToTerm (VFloat64 i) = pure $ TDouble i
-valueVariantToTerm (VText t) = twiddleString t
+valueVariantToTerm (VText t) = twiddleText t
 valueVariantToTerm (VBytes b) = twiddleBytes b
 valueVariantToTerm (VBool b) = pure $ TBool b
