@@ -53,8 +53,6 @@ import Codec.CBOR.Cuddle.CDDL.Custom.Generator (
   GenPhase,
   TwiddleConfig (..),
   TwiddlePolicy (..),
-  isDefiniteAllowed,
-  isIndefiniteAllowed,
   withTwiddle,
  )
 import Codec.CBOR.Cuddle.CDDL.Custom.Validator (
@@ -169,8 +167,13 @@ genHalf = do
 genTwiddled :: (TwiddleConfig -> TwiddlePolicy) -> (a -> Term) -> (a -> Term) -> a -> CBORGen Term
 genTwiddled getPolicy definite indefinite term = do
   policy <- asks $ getPolicy . gcTwiddle . geConfig
-  elements $
-    [definite term | isDefiniteAllowed policy] <> [indefinite term | isIndefiniteAllowed policy]
+  case policy of
+    DefiniteAndIndefinite -> elements [definite term, indefinite term]
+    DefiniteOnly -> pure (definite term) |! pure (indefinite term)
+    IndefiniteOnly -> pure (indefinite term) |! pure (definite term)
+
+-- elements $
+--   [definite term | isDefiniteAllowed policy] <> [indefinite term | isIndefiniteAllowed policy]
 
 twiddleArray :: [Term] -> CBORGen Term
 twiddleArray = genTwiddled tcArrays TList TListI
