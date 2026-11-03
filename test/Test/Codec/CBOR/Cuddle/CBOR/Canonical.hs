@@ -13,6 +13,7 @@ import Codec.CBOR.Cuddle.CBOR.Canonical (
 import Codec.CBOR.Term (Term (..))
 import Data.ByteString qualified as BS
 import Data.ByteString.Lazy qualified as BSL
+import Data.Set qualified as Set
 import Data.Text.Lazy qualified as TL
 import Data.Word (Word64)
 import Test.Hspec
@@ -102,6 +103,38 @@ spec = do
       it "key order is irrelevant" $
         toCanonical (TMap [(TInt 1, TInt 10), (TInt 2, TInt 20)])
           `shouldBe` toCanonical (TMap [(TInt 2, TInt 20), (TInt 1, TInt 10)])
+
+      -- `TInt 1` and `TInteger 1` are distinct raw keys that canonicalize to
+      -- the same key, so these exercise duplicate-key handling after
+      -- canonicalization.
+      describe "pairs sharing a canonical key" $ do
+        let dupKeyMap =
+              TMap [(TInt 1, TInt 10), (TInteger 1, TInt 20)]
+
+        it "retains pairs with different values without throwing" $
+          case toCanonical dupKeyMap of
+            CTMap pairs ->
+              pairs
+                `shouldBe` Set.fromList
+                  [ (CTInt 1, CTInt 10)
+                  , (CTInt 1, CTInt 20)
+                  ]
+            other -> expectationFailure $ "expected CTMap, got " <> show other
+
+        it "compare equal after reordering" $
+          toCanonical dupKeyMap
+            `shouldBe` toCanonical (TMap [(TInteger 1, TInt 20), (TInt 1, TInt 10)])
+
+        it "compare unequal when a distinct pair is removed" $ do
+          toCanonical dupKeyMap
+            `shouldNotBe` toCanonical (TMap [(TInt 1, TInt 10)])
+          toCanonical dupKeyMap
+            `shouldNotBe` toCanonical (TMap [(TInteger 1, TInt 20)])
+
+        it "collapse identical canonical pairs" $ do
+          let collapsed = toCanonical (TMap [(TInt 1, TInt 10), (TInteger 1, TInt 10)])
+          collapsed `shouldBe` CTMap (Set.singleton (CTInt 1, CTInt 10))
+          collapsed `shouldBe` toCanonical (TMap [(TInt 1, TInt 10)])
 
     describe "floats stay distinct by width" $ do
       it "THalf 1.0 ≠ TFloat 1.0" $

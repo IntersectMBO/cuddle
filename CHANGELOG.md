@@ -9,6 +9,7 @@
 * Add `twiddleUniform`, `twiddleAll`, `twiddleNothing` and `withTwiddle`
 * Add `isDefiniteAllowed` and `isIndefiniteAllowed`
 * Remove `enableTwiddle`
+* Change `CTMap` to use a `Set` of pairs instead of `Map`
 
 ## 1.8.1.0
 
