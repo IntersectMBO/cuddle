@@ -10,6 +10,11 @@
 * Add `isDefiniteAllowed` and `isIndefiniteAllowed`
 * Remove `enableTwiddle`
 * Change `CTMap` to use a `Set` of pairs instead of `Map`
+* Add `MonadAntiGen` instance for `CBORGen`
+* Remove `liftAntiGen` from `Codec.CBOR.Cuddle.CDDL.Custom.Generator`
+* Add `GenValidator` constructor to `XXCTree GenPhase`
+* Export `validateAgainst` from `Codec.CBOR.Cuddle.CBOR.Validator`
+* Add `IndexMappable` instances from `GenPhase` to `ValidatorPhase` for `CTree` and `CTreeRoot`
 
 ## 1.8.1.0
 
