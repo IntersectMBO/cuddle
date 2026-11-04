@@ -23,6 +23,11 @@ module Codec.CBOR.Cuddle.CBOR.Gen (
   twiddleMap,
   twiddleText,
   twiddleBytes,
+  genNBytes,
+  genBytes,
+  genNBytesText,
+  genText,
+  genTerm,
 ) where
 
 #if MIN_VERSION_random(1,3,0)

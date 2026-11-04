@@ -2,6 +2,7 @@
 
 ## 1.9.0.0
 
+* Export `genNBytes`, `genBytes`, `genNBytesText`, `genText` and `genTerm`
 * Export `twiddleArray`, `twiddleMap`, `twiddleText` and `twiddleBytes`
 * Add `TwiddleConfig` for setting a `TwiddlePolicy` for bytes, arrays, text and maps separately
 * Add `TwiddlePolicy` with `DefiniteOnly`, `IndefiniteOnly` and `DefiniteAndIndefinite`
