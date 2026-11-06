@@ -188,7 +188,7 @@ instance IndexMappable CTree MonoReferenced GenPhase where
     where
       mapExt (MRuleRef n) = CTreeE $ GenRef n
       mapExt (MGenerator g x) = CTreeE $ GenGenerator g (mapIndex x)
-      mapExt (MValidator _ x) = mapIndex x
+      mapExt (MValidator v x) = CTreeE $ GenValidator v (mapIndex x)
 
 instance IndexMappable CTreeRoot MonoReferenced GenPhase where
   mapIndex (CTreeRoot m) = CTreeRoot $ mapIndex <$> m
@@ -387,9 +387,9 @@ postludeBinding =
     ]
 
 data BindingEnv i j = BindingEnv
-  { global :: Map.Map (Name) (ProvidedParameters (CTree i))
+  { global :: Map.Map Name (ProvidedParameters (CTree i))
   -- ^ Global name bindings via 'RuleDef'
-  , local :: Map.Map (Name) (CTree j)
+  , local :: Map.Map Name (CTree j)
   -- ^ Local bindings for generic parameters
   }
   deriving (Generic)
@@ -507,6 +507,7 @@ instance IndexMappable CTree GenPhase MonoSimplePhase where
     where
       mapExt (GenRef n) = CTreeE $ MSimpleRef n
       mapExt (GenGenerator _ x) = mapIndex x
+      mapExt (GenValidator _ x) = mapIndex x
 
 instance IndexMappable CTreeRoot GenPhase MonoSimplePhase where
   mapIndex (CTreeRoot m) = CTreeRoot $ mapIndex <$> m

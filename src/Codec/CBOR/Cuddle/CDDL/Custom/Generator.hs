@@ -13,20 +13,21 @@ module Codec.CBOR.Cuddle.CDDL.Custom.Generator (
   withLocalGenBindings,
 
   -- * Twiddling
-  TwiddleConfig (..),
-  TwiddlePolicy (..),
+  CodecConfig (..),
+  LengthPolicy (..),
   isIndefiniteAllowed,
   isDefiniteAllowed,
-  twiddleUniform,
+  uniformLengthPolicy,
   twiddleAll,
   twiddleNothing,
-  withTwiddle,
+  withCodecConfig,
   disableTwiddle,
 ) where
 
 import Codec.CBOR.Cuddle.CDDL (GRef (..), Name (..))
 import Codec.CBOR.Cuddle.CDDL.CTree (CTree, CTreeRoot (..), XXCTree)
 import Codec.CBOR.Cuddle.CDDL.Custom.Core (MonadCddl (..), RuleTerm)
+import Codec.CBOR.Cuddle.CDDL.Custom.Validator (TermValidator)
 import Control.Monad.Reader (MonadReader (..), MonadTrans (..), ReaderT (..), asks, mapReaderT)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
@@ -37,47 +38,47 @@ import Test.QuickCheck.GenT (MonadGen (..))
 
 type data GenPhase
 
-data TwiddlePolicy
+data LengthPolicy
   = DefiniteOnly
   | IndefiniteOnly
   | DefiniteAndIndefinite
   deriving (Generic, Show, Eq, Ord, Enum)
 
-isDefiniteAllowed :: TwiddlePolicy -> Bool
+isDefiniteAllowed :: LengthPolicy -> Bool
 isDefiniteAllowed IndefiniteOnly = False
 isDefiniteAllowed _ = True
 
-isIndefiniteAllowed :: TwiddlePolicy -> Bool
+isIndefiniteAllowed :: LengthPolicy -> Bool
 isIndefiniteAllowed DefiniteOnly = False
 isIndefiniteAllowed _ = True
 
-data TwiddleConfig = TwiddleConfig
-  { tcBytes :: !TwiddlePolicy
-  , tcArrays :: !TwiddlePolicy
-  , tcText :: !TwiddlePolicy
-  , tcMaps :: !TwiddlePolicy
+data CodecConfig = CodecConfig
+  { ccBytesLengthPolicy :: !LengthPolicy
+  , ccArraysLengthPolicy :: !LengthPolicy
+  , ccTextLengthPolicy :: !LengthPolicy
+  , ccMapsLengthPolicy :: !LengthPolicy
   }
   deriving (Generic, Show, Eq, Ord)
 
-twiddleUniform :: TwiddlePolicy -> TwiddleConfig
-twiddleUniform policy =
-  TwiddleConfig
-    { tcBytes = policy
-    , tcArrays = policy
-    , tcText = policy
-    , tcMaps = policy
+uniformLengthPolicy :: LengthPolicy -> CodecConfig
+uniformLengthPolicy policy =
+  CodecConfig
+    { ccBytesLengthPolicy = policy
+    , ccArraysLengthPolicy = policy
+    , ccTextLengthPolicy = policy
+    , ccMapsLengthPolicy = policy
     }
 
-twiddleAll :: TwiddleConfig
-twiddleAll = twiddleUniform DefiniteAndIndefinite
+twiddleAll :: CodecConfig
+twiddleAll = uniformLengthPolicy DefiniteAndIndefinite
 
-twiddleNothing :: TwiddleConfig
-twiddleNothing = twiddleUniform DefiniteOnly
+twiddleNothing :: CodecConfig
+twiddleNothing = uniformLengthPolicy DefiniteOnly
 
 -- | User-supplied configuration for the generator monad.
 data GenConfig = GenConfig
   { gcRoot :: CTreeRoot GenPhase
-  , gcTwiddle :: !TwiddleConfig
+  , gcTwiddle :: !CodecConfig
   }
   deriving (Generic)
 
@@ -122,8 +123,8 @@ instance MonadCddl CBORGen where
 withAntiGen :: (AntiGen a -> AntiGen b) -> CBORGen a -> CBORGen b
 withAntiGen f (CBORGen m) = CBORGen $ mapReaderT f m
 
-withTwiddle :: (TwiddleConfig -> TwiddleConfig) -> CBORGen a -> CBORGen a
-withTwiddle f =
+withCodecConfig :: (CodecConfig -> CodecConfig) -> CBORGen a -> CBORGen a
+withCodecConfig f =
   local
     ( \env ->
         env
@@ -135,7 +136,7 @@ withTwiddle f =
     )
 
 disableTwiddle :: CBORGen a -> CBORGen a
-disableTwiddle = withTwiddle $ const twiddleNothing
+disableTwiddle = withCodecConfig $ const twiddleNothing
 
 -- | Run an action with the given local generic bindings installed.
 -- Used to wrap custom generators attached to generic rules so that
@@ -148,6 +149,7 @@ withLocalGenBindings binds =
 data instance XXCTree GenPhase
   = GenRef Name
   | GenGenerator (CBORGen RuleTerm) (CTree GenPhase)
+  | GenValidator TermValidator (CTree GenPhase)
 
 class HasGenerator a where
   generatorL :: Lens' a (Maybe (CBORGen RuleTerm))

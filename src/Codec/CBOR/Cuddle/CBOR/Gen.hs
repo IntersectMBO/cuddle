@@ -11,6 +11,7 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE ViewPatterns #-}
+{-# OPTIONS_GHC -Wno-orphans #-}
 
 -- | Generate example CBOR given a CDDL specification
 module Codec.CBOR.Cuddle.CBOR.Gen (
@@ -22,11 +23,17 @@ module Codec.CBOR.Cuddle.CBOR.Gen (
   twiddleMap,
   twiddleText,
   twiddleBytes,
+  genNBytes,
+  genBytes,
+  genNBytesText,
+  genText,
+  genTerm,
 ) where
 
 #if MIN_VERSION_random(1,3,0)
 #endif
 import Codec.CBOR.Cuddle.CBOR.Canonical (nintMin, toCanonical, uintMax)
+import Codec.CBOR.Cuddle.CBOR.Validator (validateAgainst)
 import Codec.CBOR.Cuddle.CDDL (
   GRef (..),
   Name (..),
@@ -37,23 +44,29 @@ import Codec.CBOR.Cuddle.CDDL (
  )
 import Codec.CBOR.Cuddle.CDDL.CTree (
   CTree (..),
+  CTreeRoot (..),
   PTerm (..),
+  foldCTree,
  )
 import Codec.CBOR.Cuddle.CDDL.CTree qualified as CTree
 import Codec.CBOR.Cuddle.CDDL.CtlOp qualified as CtlOp
 import Codec.CBOR.Cuddle.CDDL.Custom.Core (MonadCddl (..), RuleTerm (..))
 import Codec.CBOR.Cuddle.CDDL.Custom.Generator (
   CBORGen,
+  CodecConfig (..),
   GenConfig (..),
   GenEnv (..),
   GenPhase,
-  TwiddleConfig (..),
-  TwiddlePolicy (..),
-  isDefiniteAllowed,
-  isIndefiniteAllowed,
-  withTwiddle,
+  LengthPolicy (..),
+  withCodecConfig,
+ )
+import Codec.CBOR.Cuddle.CDDL.Custom.Validator (
+  CustomValidatorResult (..),
+  ValidatorPhase,
+  runValidator,
  )
 import Codec.CBOR.Cuddle.CDDL.Resolve (XXCTree (..), showSimple)
+import Codec.CBOR.Cuddle.IndexMappable (IndexMappable (..))
 import Codec.CBOR.Term (Term (..))
 import Codec.CBOR.Term qualified as CBOR
 import Codec.CBOR.Write qualified as CBOR
@@ -65,7 +78,6 @@ import Data.Char (chr)
 import Data.Functor ((<&>))
 import Data.List (sortOn)
 import Data.List.NonEmpty qualified as NE
-import Data.Map.Strict qualified as Map
 import Data.Maybe (fromMaybe)
 import Data.Ord (Down (..))
 import Data.Text (Text)
@@ -89,15 +101,18 @@ import Test.AntiGen (
   faultyNum,
   reweigh,
   runAntiGen,
+  (#!),
   (|!),
+  (||!),
  )
 import Test.QuickCheck (
   Arbitrary,
   NonNegative (..),
+  shuffle,
  )
 import Test.QuickCheck qualified as QC
 import Test.QuickCheck.Gen (Gen (..), getSize)
-import Test.QuickCheck.GenT (MonadGen (..), elements, frequency, listOf, oneof, suchThat, vectorOf)
+import Test.QuickCheck.GenT (MonadGen (..), elements, frequency, listOf, oneof, vectorOf)
 
 -- TODO remove this once QuickCheck gets QC
 data QC = QC
@@ -123,6 +138,15 @@ arbitrary = liftGen QC.arbitrary
 scale :: MonadGen m => (Int -> Int) -> m a -> m a
 scale f m = sized $ \n -> resize (f n) m
 
+suchThat :: Monad m => m a -> (a -> Bool) -> m a
+suchThat gen p = go 100
+  where
+    go (n :: Int)
+      | n > 0 = do
+          v <- gen
+          if p v then pure v else go $ pred n
+      | otherwise = error "Failed to generate a fitting value after 100 tries"
+
 --------------------------------------------------------------------------------
 -- Generator infrastructure
 --------------------------------------------------------------------------------
@@ -145,23 +169,28 @@ genHalf = do
     then genHalf
     else pure $ fromHalf half
 
-genTwiddled :: (TwiddleConfig -> TwiddlePolicy) -> (a -> Term) -> (a -> Term) -> a -> CBORGen Term
+genTwiddled :: (CodecConfig -> LengthPolicy) -> (a -> Term) -> (a -> Term) -> a -> CBORGen Term
 genTwiddled getPolicy definite indefinite term = do
   policy <- asks $ getPolicy . gcTwiddle . geConfig
-  elements $
-    [definite term | isDefiniteAllowed policy] <> [indefinite term | isIndefiniteAllowed policy]
+  case policy of
+    DefiniteAndIndefinite -> elements [definite term, indefinite term]
+    DefiniteOnly -> pure (definite term) |! pure (indefinite term)
+    IndefiniteOnly -> pure (indefinite term) |! pure (definite term)
+
+-- elements $
+--   [definite term | isDefiniteAllowed policy] <> [indefinite term | isIndefiniteAllowed policy]
 
 twiddleArray :: [Term] -> CBORGen Term
-twiddleArray = genTwiddled tcArrays TList TListI
+twiddleArray = genTwiddled ccArraysLengthPolicy TList TListI
 
 twiddleMap :: [(Term, Term)] -> CBORGen Term
-twiddleMap = genTwiddled tcMaps TMap TMapI
+twiddleMap = genTwiddled ccMapsLengthPolicy TMap TMapI
 
 twiddleText :: Text -> CBORGen Term
-twiddleText = genTwiddled tcText TString (TStringI . TL.fromStrict)
+twiddleText = genTwiddled ccTextLengthPolicy TString (TStringI . TL.fromStrict)
 
 twiddleBytes :: ByteString -> CBORGen Term
-twiddleBytes = genTwiddled tcBytes TBytes (TBytesI . LBS.fromStrict)
+twiddleBytes = genTwiddled ccBytesLengthPolicy TBytes (TBytesI . LBS.fromStrict)
 
 genTerm :: CBORGen Term
 genTerm =
@@ -327,6 +356,7 @@ annotateTerm = \case
   CTree.Tag {} -> annotate "tag"
   CTree.CTreeE (GenRef n) -> annotate (unName n)
   CTree.CTreeE (GenGenerator _ _) -> annotate "custom_generator"
+  CTree.CTreeE (GenValidator _ _) -> id
 
 genForCTree :: HasCallStack => CTree GenPhase -> CBORGen RuleTerm
 genForCTree node = annotateTerm node $ case node of
@@ -348,6 +378,13 @@ genForCTree node = annotateTerm node $ case node of
   CTree.Tag t n -> genTag t n
   CTree.CTreeE (GenRef n) -> genForNode n
   CTree.CTreeE (GenGenerator gen _) -> gen
+  CTree.CTreeE (GenValidator _ x) -> genForCTree x
+
+isInvalidAgainstNode :: CTreeRoot ValidatorPhase -> Term -> CTree GenPhase -> Bool
+isInvalidAgainstNode cTreeRoot term node =
+  case runValidator (validateAgainst term $ mapIndex node) cTreeRoot of
+    CustomValidatorSuccess -> False
+    CustomValidatorFailure {} -> True
 
 -- | Generate a map from a list of nodes
 genMap ::
@@ -360,26 +397,40 @@ genMap nodes = do
     elemsNeeded _ = 0
 
     tryGenKV ::
-      Int -> Map.Map Term a -> CTree GenPhase -> CTree GenPhase -> CBORGen (Maybe (Term, Term))
-    tryGenKV nTries m kNode vNode = go nTries
+      Int -> [(Term, Term)] -> CTree GenPhase -> CTree GenPhase -> CBORGen (Maybe (Term, Term))
+    tryGenKV nTries m kNode vNode
+      | null m = go nTries
+      | otherwise =
+          go nTries
+            ||! oneof
+              [ reuseKey #! "duplicateKey"
+              , reuseKeyValue #! "duplicateKV"
+              ]
       where
-        canonicalKeys = toCanonical <$> Map.keys m
+        canonicalKeys = toCanonical . fst <$> m
         unS (SingleTerm x) = x
         unS x = error $ "Expected single, got " <> show x
+        genFromNode n = unS <$> scale (`div` 2) (genForCTree n)
         go !n
           | n > 0 = do
-              k <- unS <$> scale (`div` 2) (annotate "key" $ genForCTree kNode)
+              k <- genFromNode kNode #! "key"
               if toCanonical k `notElem` canonicalKeys
                 then do
-                  v <- unS <$> scale (`div` 2) (annotate "value" $ genForCTree vNode)
+                  v <- genFromNode vNode #! "value"
                   pure $ Just (k, v)
                 else go (n - 1)
           | otherwise = pure Nothing
+        reuseKey = do
+          k <- elements $ fst <$> m
+          v <- genFromNode vNode #! "value"
+          pure $ Just (k, v)
+        reuseKeyValue = Just <$> elements m
 
-    genNodes :: Int -> Map.Map Term Term -> [CTree GenPhase] -> CBORGen (Maybe (Map.Map Term Term))
+    genNodes :: Int -> [(Term, Term)] -> [CTree GenPhase] -> CBORGen (Maybe [(Term, Term)])
     genNodes _ m [] = pure $ Just m
     genNodes !i !m (n : ns) =
       let
+        ann :: CBORGen a -> CBORGen a
         ann = annotate (T.pack $ show i)
         -- A term was produced, advance the index
         next x y = scale (\s -> max 0 (s - 1)) $ genNodes (i + 1) x y
@@ -392,39 +443,61 @@ genMap nodes = do
           KV kNode vNode _ -> do
             mKV <- ann $ tryGenKV 100 m kNode vNode
             case mKV of
-              Just (k, v) -> next (Map.insert k v m) ns
+              Just (k, v) -> next ((k, v) : m) ns ||! same m ns
               Nothing -> pure Nothing
           Occur kv@(KV kNode vNode _) oi -> case oi of
             OIOptional -> do
               mt <- optGenKV kNode vNode
               case mt of
-                Just (k, v) -> next (Map.insert k v m) ns
+                Just (k, v) -> next ((k, v) : m) ns
                 Nothing -> same m ns
             OIZeroOrMore -> do
               mt <- optGenKV kNode vNode
               case mt of
-                Just (k, v) -> next (Map.insert k v m) (n : ns)
+                Just (k, v) -> next ((k, v) : m) (n : ns)
                 Nothing -> same m ns
-            OIOneOrMore -> genNodes i m (kv : Occur kv OIZeroOrMore : ns)
+            OIOneOrMore ->
+              ( do
+                  mKV <- ann $ tryGenKV 100 m kNode vNode
+                  case mKV of
+                    Just (k, v) -> next ((k, v) : m) (Occur kv OIZeroOrMore : ns)
+                    Nothing -> pure Nothing
+              )
+                ||! same m ns
             OIBounded mlb mub -> do
+              sz <- fromIntegral <$> liftGen getSize
               let
-                clampedPred 0 = 0
-                clampedPred x = x - 1
-                newLow = clampedPred <$> mlb
-                newHigh = clampedPred <$> mub
-                res
-                  | maybe False (> 0) mlb = genNodes i m (kv : Occur kv (OIBounded newLow newHigh) : ns)
-                  | maybe False (< 1) mub = same m ns
+                lowerBound = fromMaybe 0 mlb
+                upperBound = fromMaybe (max lowerBound sz) mub
+                outerBound = maybe upperBound (max sz . succ) mub
+                genElems i' m' nElems
+                  | nElems <= 0 =
+                      scale (\s -> max 0 (s - 1)) $ genNodes (i' + 1) m' ns
                   | otherwise = do
-                      mt <- optGenKV kNode vNode
-                      case mt of
-                        Just (k, v) -> next (Map.insert k v m) (Occur kv (OIBounded newLow newHigh) : ns)
-                        Nothing -> same m ns
-              res
+                      mKV <- annotate (T.pack $ show i') $ tryGenKV 100 m' kNode vNode
+                      case mKV of
+                        Just (k, v) -> genElems (i' + 1) ((k, v) : m') $ nElems - 1
+                        Nothing -> pure Nothing
+              nElems <- antiChoose (lowerBound, upperBound) (0, outerBound)
+              genElems i m nElems
           node -> error $ "Unexpected node: " <> showSimple node
-  mItems <- genNodes 0 Map.empty $ sortOn (Down . elemsNeeded) nodes
+  mItems <- genNodes 0 [] $ sortOn (Down . elemsNeeded) nodes
   case mItems of
-    Just items -> SingleTerm <$> twiddleMap (Map.toList items)
+    Just items -> do
+      cTreeRoot <- asks $ gcRoot . geConfig
+      items' <-
+        pure items ||! do
+          let
+            cTreeRootV = mapIndex cTreeRoot
+            keyIsInvalidAgainstNode term = \case
+              KV kNode _ _ -> isInvalidAgainstNode cTreeRootV term kNode
+              Occur x _ -> keyIsInvalidAgainstNode term x
+              node -> error $ "Unexpected node: " <> showSimple node
+          junkKV <-
+            (,) <$> (genTerm `suchThat` \t -> all (keyIsInvalidAgainstNode t) nodes) <*> genTerm
+          pure $ junkKV : items
+      shuffledItems <- liftGen $ shuffle items'
+      SingleTerm <$> twiddleMap shuffledItems
     Nothing -> error "Failed to generate unique keys for map after max retries"
 
 -- | Generate an array from a list of nodes
@@ -437,7 +510,19 @@ genArray nodes = do
         [0 :: Int ..]
         nodes
   case items of
-    Just ts -> SingleTerm <$> twiddleArray ts
+    Just ts -> do
+      cTreeRoot <- asks $ gcRoot . geConfig
+      SingleTerm
+        <$> twiddleArray ts ||! do
+          let
+            genCorruptedList = do
+              idx <- choose (0, length ts)
+              junkElem <- genTerm
+              let
+                (lInit, lTail) = splitAt idx ts
+              twiddleArray $ lInit <> [junkElem] <> lTail
+            cTreeRootV = mapIndex cTreeRoot
+          genCorruptedList `suchThat` \l -> isInvalidAgainstNode cTreeRootV l (Array nodes)
     Nothing -> error "Something weird happened which shouldn't be possible"
 
 -- | Generate a key-value pair
@@ -546,7 +631,7 @@ genTag t node = do
         n
           | n == 2 || n == 3 ->
               -- TODO remove this once `cborg` can decode indefinite bytes in bignums
-              withTwiddle (\c -> c {tcBytes = DefiniteOnly}) $ genForCTree node
+              withCodecConfig (\c -> c {ccBytesLengthPolicy = DefiniteOnly}) $ genForCTree node
         _ -> genForCTree node
       case enc of
         SingleTerm x -> pure $ SingleTerm $ TTagged tag x
@@ -649,3 +734,14 @@ valueVariantToTerm (VFloat64 i) = pure $ TDouble i
 valueVariantToTerm (VText t) = twiddleText t
 valueVariantToTerm (VBytes b) = twiddleBytes b
 valueVariantToTerm (VBool b) = pure $ TBool b
+
+instance IndexMappable CTree GenPhase ValidatorPhase where
+  mapIndex = foldCTree mapExt mapIndex
+    where
+      mapExt = \case
+        GenRef n -> CTreeE $ VRuleRef n
+        GenGenerator _ x -> mapIndex x
+        GenValidator v x -> CTreeE . VValidator v $ mapIndex x
+
+instance IndexMappable CTreeRoot GenPhase ValidatorPhase where
+  mapIndex (CTreeRoot m) = CTreeRoot $ mapIndex <$> m

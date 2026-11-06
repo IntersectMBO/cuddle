@@ -2,6 +2,7 @@
 
 ## 1.9.0.0
 
+* Export `genNBytes`, `genBytes`, `genNBytesText`, `genText` and `genTerm`
 * Export `twiddleArray`, `twiddleMap`, `twiddleText` and `twiddleBytes`
 * Add `TwiddleConfig` for setting a `TwiddlePolicy` for bytes, arrays, text and maps separately
 * Add `TwiddlePolicy` with `DefiniteOnly`, `IndefiniteOnly` and `DefiniteAndIndefinite`
@@ -10,6 +11,11 @@
 * Add `isDefiniteAllowed` and `isIndefiniteAllowed`
 * Remove `enableTwiddle`
 * Change `CTMap` to use a `Set` of pairs instead of `Map`
+* Add `MonadAntiGen` instance for `CBORGen`
+* Remove `liftAntiGen` from `Codec.CBOR.Cuddle.CDDL.Custom.Generator`
+* Add `GenValidator` constructor to `XXCTree GenPhase`
+* Export `validateAgainst` from `Codec.CBOR.Cuddle.CBOR.Validator`
+* Add `IndexMappable` instances from `GenPhase` to `ValidatorPhase` for `CTree` and `CTreeRoot`
 
 ## 1.8.1.0
 
