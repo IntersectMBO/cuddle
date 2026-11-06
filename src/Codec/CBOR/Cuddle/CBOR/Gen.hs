@@ -53,12 +53,12 @@ import Codec.CBOR.Cuddle.CDDL.CtlOp qualified as CtlOp
 import Codec.CBOR.Cuddle.CDDL.Custom.Core (MonadCddl (..), RuleTerm (..))
 import Codec.CBOR.Cuddle.CDDL.Custom.Generator (
   CBORGen,
+  CodecConfig (..),
   GenConfig (..),
   GenEnv (..),
   GenPhase,
-  TwiddleConfig (..),
-  TwiddlePolicy (..),
-  withTwiddle,
+  LengthPolicy (..),
+  withCodecConfig,
  )
 import Codec.CBOR.Cuddle.CDDL.Custom.Validator (
   CustomValidatorResult (..),
@@ -169,7 +169,7 @@ genHalf = do
     then genHalf
     else pure $ fromHalf half
 
-genTwiddled :: (TwiddleConfig -> TwiddlePolicy) -> (a -> Term) -> (a -> Term) -> a -> CBORGen Term
+genTwiddled :: (CodecConfig -> LengthPolicy) -> (a -> Term) -> (a -> Term) -> a -> CBORGen Term
 genTwiddled getPolicy definite indefinite term = do
   policy <- asks $ getPolicy . gcTwiddle . geConfig
   case policy of
@@ -181,16 +181,16 @@ genTwiddled getPolicy definite indefinite term = do
 --   [definite term | isDefiniteAllowed policy] <> [indefinite term | isIndefiniteAllowed policy]
 
 twiddleArray :: [Term] -> CBORGen Term
-twiddleArray = genTwiddled tcArrays TList TListI
+twiddleArray = genTwiddled ccArraysLengthPolicy TList TListI
 
 twiddleMap :: [(Term, Term)] -> CBORGen Term
-twiddleMap = genTwiddled tcMaps TMap TMapI
+twiddleMap = genTwiddled ccMapsLengthPolicy TMap TMapI
 
 twiddleText :: Text -> CBORGen Term
-twiddleText = genTwiddled tcText TString (TStringI . TL.fromStrict)
+twiddleText = genTwiddled ccTextLengthPolicy TString (TStringI . TL.fromStrict)
 
 twiddleBytes :: ByteString -> CBORGen Term
-twiddleBytes = genTwiddled tcBytes TBytes (TBytesI . LBS.fromStrict)
+twiddleBytes = genTwiddled ccBytesLengthPolicy TBytes (TBytesI . LBS.fromStrict)
 
 genTerm :: CBORGen Term
 genTerm =
@@ -631,7 +631,7 @@ genTag t node = do
         n
           | n == 2 || n == 3 ->
               -- TODO remove this once `cborg` can decode indefinite bytes in bignums
-              withTwiddle (\c -> c {tcBytes = DefiniteOnly}) $ genForCTree node
+              withCodecConfig (\c -> c {ccBytesLengthPolicy = DefiniteOnly}) $ genForCTree node
         _ -> genForCTree node
       case enc of
         SingleTerm x -> pure $ SingleTerm $ TTagged tag x
