@@ -51,6 +51,7 @@ import Codec.CBOR.Cuddle.CDDL.Custom.Generator (
   GenConfig (..),
   GenEnv (..),
   GenPhase,
+  TermGenerator (..),
   TwiddleConfig (..),
   TwiddlePolicy (..),
   isDefiniteAllowed,
@@ -369,7 +370,7 @@ genForCTree node = annotateTerm node $ case node of
   CTree.Unwrap n -> genForCTree n
   CTree.Tag t n -> genTag t n
   CTree.CTreeE (GenRef n) -> genForNode n
-  CTree.CTreeE (GenGenerator gen _) -> gen
+  CTree.CTreeE (GenGenerator gen _) -> tgGenerator gen
   CTree.CTreeE (GenValidator _ x) -> genForCTree x
 
 isInvalidAgainstNode :: CTreeRoot ValidatorPhase -> Term -> CTree GenPhase -> Bool
