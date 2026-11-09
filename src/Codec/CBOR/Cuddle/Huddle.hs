@@ -94,6 +94,7 @@ module Codec.CBOR.Cuddle.Huddle (
 
   -- * Generators
   withCBORGen,
+  withGenerator,
 
   -- * Validators
   withValidator,
@@ -120,7 +121,12 @@ import Codec.CBOR.Cuddle.CDDL (
 import Codec.CBOR.Cuddle.CDDL qualified as C
 import Codec.CBOR.Cuddle.CDDL.CtlOp qualified as CtlOp
 import Codec.CBOR.Cuddle.CDDL.Custom.Core (RuleTerm)
-import Codec.CBOR.Cuddle.CDDL.Custom.Generator (CBORGen, HasGenerator (..))
+import Codec.CBOR.Cuddle.CDDL.Custom.Generator (
+  CBORGen,
+  HasGenerator (..),
+  TermGenerator,
+  simpleGen,
+ )
 import Codec.CBOR.Cuddle.CDDL.Custom.Validator (HasValidator (..), TermValidator)
 import Codec.CBOR.Cuddle.Comments (Comment, HasComment (..))
 import Codec.CBOR.Cuddle.Comments qualified as C
@@ -157,7 +163,7 @@ newtype instance C.XCddl HuddleStage = HuddleXCddl [C.Comment]
 
 data instance C.XRule HuddleStage = HuddleXRule
   { hxrComment :: C.Comment
-  , hxrGenerator :: Maybe (CBORGen RuleTerm)
+  , hxrGenerator :: Maybe TermGenerator
   , hxrValidator :: Maybe TermValidator
   }
   deriving (Generic)
@@ -1377,10 +1383,12 @@ toCDDL' HuddleConfig {..} hdl =
           C.GenericParameters $
             fmap (\(GRef t) -> GenericParameter (C.Name t) $ HuddleXTerm mempty) (args gr)
 
--- | Use a custom `CBORGen` generator to generate the term. Will override
--- the custom generator passed via `withGenerator`.
+withGenerator :: HasGenerator a => TermGenerator -> a -> a
+withGenerator gen = L.set generatorL $ Just gen
+
+-- | Use a custom `CBORGen` generator to generate the term.
 withCBORGen :: HasGenerator a => CBORGen RuleTerm -> a -> a
-withCBORGen gen = L.set generatorL $ Just gen
+withCBORGen = withGenerator . simpleGen
 
 withValidator :: HasValidator a => TermValidator -> a -> a
 withValidator p = L.set validatorL $ Just p
