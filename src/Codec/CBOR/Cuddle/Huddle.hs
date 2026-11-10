@@ -163,7 +163,7 @@ newtype instance C.XCddl HuddleStage = HuddleXCddl [C.Comment]
 
 data instance C.XRule HuddleStage = HuddleXRule
   { hxrComment :: C.Comment
-  , hxrGenerator :: Maybe TermGenerator
+  , hxrGenerator :: Maybe (TermGenerator RuleTerm)
   , hxrValidator :: Maybe TermValidator
   }
   deriving (Generic)
@@ -1383,7 +1383,7 @@ toCDDL' HuddleConfig {..} hdl =
           C.GenericParameters $
             fmap (\(GRef t) -> GenericParameter (C.Name t) $ HuddleXTerm mempty) (args gr)
 
-withGenerator :: HasGenerator a => TermGenerator -> a -> a
+withGenerator :: HasGenerator a => TermGenerator RuleTerm -> a -> a
 withGenerator gen = L.set generatorL $ Just gen
 
 -- | Use a custom `CBORGen` generator to generate the term.

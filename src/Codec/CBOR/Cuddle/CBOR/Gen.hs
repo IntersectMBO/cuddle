@@ -27,7 +27,7 @@ module Codec.CBOR.Cuddle.CBOR.Gen (
 
 #if MIN_VERSION_random(1,3,0)
 #endif
-import Codec.CBOR.Cuddle.CBOR.Canonical (nintMin, toCanonical, uintMax)
+import Codec.CBOR.Cuddle.CBOR.Canonical (CanonicalTerm (..), nintMin, toCanonical, uintMax)
 import Codec.CBOR.Cuddle.CBOR.Validator (validateAgainst)
 import Codec.CBOR.Cuddle.CDDL (
   GRef (..),
@@ -54,10 +54,13 @@ import Codec.CBOR.Cuddle.CDDL.Custom.Generator (
   TermGenerator (..),
   TwiddleConfig (..),
   TwiddlePolicy (..),
+  genFromInterval,
   isDefiniteAllowed,
   isIndefiniteAllowed,
   withTwiddle,
  )
+import Codec.CBOR.Cuddle.CDDL.Custom.Generator qualified as Gen
+import Codec.CBOR.Cuddle.CDDL.Custom.Generator qualified as Interval
 import Codec.CBOR.Cuddle.CDDL.Custom.Validator (
   CustomValidatorResult (..),
   ValidatorPhase,
@@ -78,6 +81,7 @@ import Data.List (sortOn)
 import Data.List.NonEmpty qualified as NE
 import Data.Maybe (fromMaybe)
 import Data.Ord (Down (..))
+import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Internal.Encoding.Utf8 (utf8Length)
@@ -160,12 +164,34 @@ simple =
   -- [0 .. 19] ++ [23] ++ [32 ..]
   [23]
 
-genHalf :: MonadGen m => m Float
-genHalf = do
-  half <- Half <$> arbitrary
-  if isDenormalized half
-    then genHalf
-    else pure $ fromHalf half
+genHalf :: TermGenerator Float
+genHalf = go mempty mempty
+  where
+    go rng exclude =
+      TermGenerator
+        { tgGenerator =
+            let gen = do
+                  half <- Half <$> genFromInterval rng `suchThat` (`Set.notMember` exclude)
+                  if isDenormalized half
+                    then gen
+                    else pure $ fromHalf half
+             in gen
+        , tgConstrain = \case
+            Gen.Range cRng -> Just $ go (rng <> fmap fromIntegral cRng) exclude
+            Gen.Eq term
+              | CTFloat x <- term -> Just $ go (rng <> Interval.singleton _) exclude
+              | otherwise -> Nothing
+            Gen.Neq term
+              | CTFloat x <- term -> Just $ go rng $ Set.insert _ exclude
+              | otherwise -> Just $ go rng exclude
+            _ -> Nothing
+        }
+
+-- do
+--  half <- Half <$> arbitrary
+--  if isDenormalized half
+--    then genHalf c
+--    else pure $ fromHalf half
 
 genTwiddled :: (TwiddleConfig -> TwiddlePolicy) -> (a -> Term) -> (a -> Term) -> a -> CBORGen Term
 genTwiddled getPolicy definite indefinite term = do
@@ -202,7 +228,7 @@ genTerm =
     , TBool <$> arbitrary
     , pure TNull
     , TSimple <$> elements simple
-    , THalf <$> genHalf
+    , THalf <$> genHalf mempty
     , TFloat <$> arbitrary
     , TDouble <$> arbitrary
     ]
@@ -241,7 +267,7 @@ genText :: MonadGen m => m Text
 genText = sized $ \sz -> genNBytesText =<< choose (0, sz)
 
 -- | Primitive types defined by the CDDL specification, with their generators
-genPostlude :: PTerm -> CBORGen Term
+genPostlude :: PTerm -> TermGenerator Term
 genPostlude pt = genPTerm =<< faultyPTerm pt
   where
     genExcluding ls =

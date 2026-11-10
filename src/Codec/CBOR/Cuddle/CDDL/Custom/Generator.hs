@@ -1,3 +1,5 @@
+{-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE MultiWayIf #-}
 {-# LANGUAGE TypeData #-}
 {-# LANGUAGE TypeFamilies #-}
 
@@ -34,8 +36,14 @@ module Codec.CBOR.Cuddle.CDDL.Custom.Generator (
   -- * Interval
   Interval (..),
   IntervalBound (..),
+  isEmpty,
+  intersect,
+  singleton,
+  contains,
+  genFromInterval,
 ) where
 
+import Codec.CBOR.Cuddle.CBOR.Canonical (CanonicalTerm)
 import Codec.CBOR.Cuddle.CDDL (GRef (..), Name (..))
 import Codec.CBOR.Cuddle.CDDL.CTree (CTree, CTreeRoot (..), XXCTree)
 import Codec.CBOR.Cuddle.CDDL.Custom.Core (MonadCddl (..), RuleTerm)
@@ -44,13 +52,15 @@ import Codec.CBOR.Term (Term)
 import Control.Monad.Reader (MonadReader (..), MonadTrans (..), ReaderT (..), asks, mapReaderT)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
+import Data.Maybe (fromMaybe)
 import Data.Set (Set)
 import Data.Text (Text)
 import Data.Word (Word64, Word8)
 import GHC.Generics (Generic)
 import Optics.Lens (Lens')
+import System.Random (Random)
 import Test.AntiGen (AntiGen, MonadAntiGen (..))
-import Test.QuickCheck.GenT (MonadGen (..))
+import Test.QuickCheck.GenT (MonadGen (..), suchThat)
 import Text.Regex.TDFA (Regex)
 
 type data GenPhase
@@ -165,11 +175,11 @@ withLocalGenBindings binds =
 
 data instance XXCTree GenPhase
   = GenRef Name
-  | GenGenerator TermGenerator (CTree GenPhase)
+  | GenGenerator (TermGenerator RuleTerm) (CTree GenPhase)
   | GenValidator TermValidator (CTree GenPhase)
 
 class HasGenerator a where
-  generatorL :: Lens' a (Maybe TermGenerator)
+  generatorL :: Lens' a (Maybe (TermGenerator RuleTerm))
 
 data IntervalBound a
   = OpenBound a
@@ -177,17 +187,90 @@ data IntervalBound a
   | Unbounded
   deriving (Eq, Show)
 
+boundary :: IntervalBound a -> Maybe a
+boundary = \case
+  Unbounded -> Nothing
+  OpenBound x -> Just x
+  ClosedBound x -> Just x
+
 data Interval a = Interval (IntervalBound a) (IntervalBound a)
   deriving (Eq, Show)
 
+-- | This function checks whether the interval contains any elements. It does
+-- not take the bounds of the type into account, it only checks whether the
+-- lower bound is smaller than the upper bound
+isEmpty :: Ord a => Interval a -> Bool
+isEmpty = \case
+  Interval (ClosedBound lo) (ClosedBound hi) -> lo > hi
+  Interval lo hi
+    | Just l <- boundary lo
+    , Just h <- boundary hi ->
+        l >= h
+  _ -> False
+
+-- | Computes the intersection of two intervals. The result may be empty (see
+-- 'isEmpty').
+intersect :: Ord a => Interval a -> Interval a -> Interval a
+intersect (Interval lo1 hi1) (Interval lo2 hi2) =
+  Interval (tighter (>) lo1 lo2) (tighter (<) hi1 hi2)
+  where
+    -- Picks the more restrictive of two bounds. @better x y@ holds when @x@
+    -- is strictly more restrictive than @y@. On equal boundaries an open bound
+    -- is more restrictive than a closed one.
+    tighter _ Unbounded b = b
+    tighter _ a Unbounded = a
+    tighter better a b
+      | Just x <- boundary a
+      , Just y <- boundary b =
+          if
+            | better x y -> a
+            | better y x -> b
+            | OpenBound _ <- a -> a
+            | otherwise -> b
+    tighter _ a _ = a
+
+singleton :: a -> Interval a
+singleton x = Interval (ClosedBound x) (ClosedBound x)
+
+contains :: Ord a => Interval a -> a -> Bool
+contains (Interval lo hi) x = satisifesUpper && satisfiesLower
+  where
+    satisifesUpper = case hi of
+      Unbounded -> True
+      OpenBound y -> x < y
+      ClosedBound y -> x <= y
+    satisfiesLower = case lo of
+      Unbounded -> True
+      OpenBound y -> y < x
+      ClosedBound y -> y <= x
+
+instance Ord a => Semigroup (Interval a) where
+  (<>) = intersect
+
+instance Ord a => Monoid (Interval a) where
+  mempty = Interval Unbounded Unbounded
+
+genFromInterval ::
+  ( MonadGen m
+  , Bounded a
+  , Random a
+  , Ord a
+  ) =>
+  Interval a ->
+  m a
+genFromInterval int@(Interval lo hi) = choose (boundLo, boundHi) `suchThat` contains int
+  where
+    boundLo = fromMaybe minBound $ boundary lo
+    boundHi = fromMaybe maxBound $ boundary hi
+
 data GenConstraint
   = -- | Constrains the size of a string or bytestring in bytes
-    Size (Interval Word64)
+    Size (Interval CanonicalTerm)
   | -- | Constrains the range of allowed values to the interval. This also covers
     -- the .gt and .lt operators.
-    Range (Interval Word64)
-  | Eq Term
-  | Neq Term
+    Range (Interval CanonicalTerm)
+  | Eq CanonicalTerm
+  | Neq CanonicalTerm
   | -- | Specifies the indices at which a bit is allowed to be set
     Bits (Set Word8)
   | -- | Constrains the string to ones that match the regex
@@ -198,21 +281,21 @@ data GenConstraint
     CustomControl Text Term
   deriving (Generic)
 
-data TermGenerator = TermGenerator
-  { tgGenerator :: CBORGen RuleTerm
-  , tgConstrain :: GenConstraint -> Maybe TermGenerator
+data TermGenerator a = TermGenerator
+  { tgGenerator :: CBORGen a
+  , tgConstrain :: GenConstraint -> Maybe (TermGenerator a)
   }
 
 -- | Constructs a @TermGenerator@ that fails whenever a control operator is
 -- applied to it.
-simpleGen :: CBORGen RuleTerm -> TermGenerator
+simpleGen :: CBORGen a -> TermGenerator a
 simpleGen gen =
   TermGenerator
     { tgGenerator = gen
     , tgConstrain = const Nothing
     }
 
-constrain :: GenConstraint -> TermGenerator -> TermGenerator
+constrain :: GenConstraint -> TermGenerator a -> TermGenerator a
 constrain c (TermGenerator _ f) = case f c of
   Just g -> g
   Nothing -> error "Failed to apply constraint"
