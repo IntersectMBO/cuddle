@@ -12,6 +12,7 @@ module Codec.CBOR.Cuddle.CDDL.CTreePhase (
 ) where
 
 import Codec.CBOR.Cuddle.CDDL (XCddl, XRule, XTerm, XXTopLevel, XXType2)
+import Codec.CBOR.Cuddle.CDDL.Custom.Core (RuleTerm)
 import Codec.CBOR.Cuddle.CDDL.Custom.Generator (TermGenerator)
 import Codec.CBOR.Cuddle.CDDL.Custom.Validator (TermValidator)
 import Data.Default.Class (Default)
@@ -31,7 +32,7 @@ data instance XCddl CTreePhase = CTreeXCddl
   deriving (Generic, Show, Eq, Ord)
 
 data instance XRule CTreePhase
-  = CTreeXRule (Maybe TermGenerator) (Maybe TermValidator)
+  = CTreeXRule (Maybe (TermGenerator RuleTerm)) (Maybe TermValidator)
   deriving (Generic)
 
 data instance XXType2 CTreePhase
