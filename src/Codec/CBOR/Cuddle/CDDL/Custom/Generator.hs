@@ -55,7 +55,7 @@ import Data.Map.Strict qualified as Map
 import Data.Maybe (fromMaybe)
 import Data.Set (Set)
 import Data.Text (Text)
-import Data.Word (Word64, Word8)
+import Data.Word (Word8)
 import GHC.Generics (Generic)
 import Optics.Lens (Lens')
 import System.Random (Random)
@@ -271,20 +271,25 @@ data GenConstraint
     Range (Interval CanonicalTerm)
   | Eq CanonicalTerm
   | Neq CanonicalTerm
+  | Default CanonicalTerm
   | -- | Specifies the indices at which a bit is allowed to be set
     Bits (Set Word8)
   | -- | Constrains the string to ones that match the regex
     Regexp Regex
   | -- | The bytestring must match the CDDL rule
     Cbor (CTree GenPhase)
+  | Cborseq (CTree GenPhase)
   | -- | Catch-all for nonstandard control operators
     CustomControl Text Term
+  | And (CTree GenPhase)
+  | Within (CTree GenPhase)
   deriving (Generic)
 
 data TermGenerator a = TermGenerator
   { tgGenerator :: CBORGen a
   , tgConstrain :: GenConstraint -> Maybe (TermGenerator a)
   }
+  deriving (Functor)
 
 -- | Constructs a @TermGenerator@ that fails whenever a control operator is
 -- applied to it.

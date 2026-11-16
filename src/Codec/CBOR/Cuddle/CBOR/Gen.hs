@@ -49,14 +49,18 @@ import Codec.CBOR.Cuddle.CDDL.Custom.Core (MonadCddl (..), RuleTerm (..))
 import Codec.CBOR.Cuddle.CDDL.Custom.Generator (
   CBORGen,
   GenConfig (..),
+  GenConstraint,
   GenEnv (..),
   GenPhase,
+  Interval (..),
   TermGenerator (..),
   TwiddleConfig (..),
   TwiddlePolicy (..),
+  constrain,
   genFromInterval,
   isDefiniteAllowed,
   isIndefiniteAllowed,
+  simpleGen,
   withTwiddle,
  )
 import Codec.CBOR.Cuddle.CDDL.Custom.Generator qualified as Gen
@@ -71,11 +75,12 @@ import Codec.CBOR.Cuddle.IndexMappable (IndexMappable (..))
 import Codec.CBOR.Term (Term (..))
 import Codec.CBOR.Term qualified as CBOR
 import Codec.CBOR.Write qualified as CBOR
-import Control.Monad (zipWithM, (<=<))
+import Control.Monad (when, zipWithM, (<=<))
 import Control.Monad.Reader (asks)
 import Data.ByteString (ByteString)
 import Data.ByteString.Lazy qualified as LBS
 import Data.Char (chr)
+import Data.Foldable (Foldable (..))
 import Data.Functor ((<&>))
 import Data.List (sortOn)
 import Data.List.NonEmpty qualified as NE
@@ -91,7 +96,7 @@ import Data.Text.Lazy.Builder (toLazyText)
 import Data.Text.Lazy.Builder qualified as LB
 import Data.Word (Word64, Word8)
 import GHC.Stack (HasCallStack)
-import Numeric.Half (Half (..), fromHalf)
+import Numeric.Half (Half (..), fromHalf, toHalf)
 import Prettyprinter (Pretty (..), layoutCompact)
 import Prettyprinter.Render.Text (renderStrict)
 import System.Random.Stateful (Random, StatefulGen (..), runStateGen_, uniformByteStringM)
@@ -171,7 +176,7 @@ genHalf = go mempty mempty
       TermGenerator
         { tgGenerator =
             let gen = do
-                  half <- Half <$> genFromInterval rng `suchThat` (`Set.notMember` exclude)
+                  half <- toHalf <$> genFromInterval rng `suchThat` (`Set.notMember` exclude)
                   if isDenormalized half
                     then gen
                     else pure $ fromHalf half
@@ -179,36 +184,30 @@ genHalf = go mempty mempty
         , tgConstrain = \case
             Gen.Range cRng -> Just $ go (rng <> fmap fromIntegral cRng) exclude
             Gen.Eq term
-              | CTFloat x <- term -> Just $ go (rng <> Interval.singleton _) exclude
+              | CTFloat x <- term -> Just $ go (rng <> Interval.singleton x) exclude
               | otherwise -> Nothing
             Gen.Neq term
-              | CTFloat x <- term -> Just $ go rng $ Set.insert _ exclude
+              | CTFloat x <- term -> Just $ go rng $ Set.insert x exclude
               | otherwise -> Just $ go rng exclude
             _ -> Nothing
         }
 
--- do
---  half <- Half <$> arbitrary
---  if isDenormalized half
---    then genHalf c
---    else pure $ fromHalf half
-
-genTwiddled :: (TwiddleConfig -> TwiddlePolicy) -> (a -> Term) -> (a -> Term) -> a -> CBORGen Term
+genTwiddled :: (TwiddleConfig -> TwiddlePolicy) -> (a -> Term) -> (a -> Term) -> a -> m Term
 genTwiddled getPolicy definite indefinite term = do
   policy <- asks $ getPolicy . gcTwiddle . geConfig
   elements $
     [definite term | isDefiniteAllowed policy] <> [indefinite term | isIndefiniteAllowed policy]
 
-twiddleArray :: [Term] -> CBORGen Term
+twiddleArray :: [Term] -> m Term
 twiddleArray = genTwiddled tcArrays TList TListI
 
-twiddleMap :: [(Term, Term)] -> CBORGen Term
+twiddleMap :: [(Term, Term)] -> m Term
 twiddleMap = genTwiddled tcMaps TMap TMapI
 
-twiddleText :: Text -> CBORGen Term
+twiddleText :: Text -> m Term
 twiddleText = genTwiddled tcText TString (TStringI . TL.fromStrict)
 
-twiddleBytes :: ByteString -> CBORGen Term
+twiddleBytes :: ByteString -> m Term
 twiddleBytes = genTwiddled tcBytes TBytes (TBytesI . LBS.fromStrict)
 
 genTerm :: CBORGen Term
@@ -228,7 +227,7 @@ genTerm =
     , TBool <$> arbitrary
     , pure TNull
     , TSimple <$> elements simple
-    , THalf <$> genHalf mempty
+    , THalf <$> tgGenerator genHalf
     , TFloat <$> arbitrary
     , TDouble <$> arbitrary
     ]
@@ -299,7 +298,7 @@ genPostlude pt = genPTerm =<< faultyPTerm pt
       PTDouble -> TDouble <$> arbitrary
       PTBytes -> twiddleBytes =<< genBytes
       PTText -> twiddleText =<< genText
-      PTAny -> genTerm
+      PTAny -> simpleGen genTerm
       PTNil -> pure TNull
       PTUndefined -> pure $ TSimple 23
 
@@ -358,7 +357,7 @@ genBetween rng = do
 
 -- | Annotate a generator with the label derived from a CTree node.
 -- Control nodes are transparent — the annotation comes from the target inside.
-annotateTerm :: CTree GenPhase -> CBORGen a -> CBORGen a
+annotateTerm :: MonadAntiGen m => CTree GenPhase -> m a -> m a
 annotateTerm = \case
   CTree.Literal _ -> annotate "literal"
   CTree.Postlude pt -> annotate $ renderStrict . layoutCompact $ pretty pt
@@ -377,7 +376,7 @@ annotateTerm = \case
   CTree.CTreeE (GenGenerator _ _) -> annotate "custom_generator"
   CTree.CTreeE (GenValidator _ _) -> id
 
-genForCTree :: HasCallStack => CTree GenPhase -> CBORGen RuleTerm
+genForCTree :: HasCallStack => CTree GenPhase -> TermGenerator RuleTerm
 genForCTree node = annotateTerm node $ case node of
   CTree.Literal v -> SingleTerm <$> valueToTerm v
   CTree.Postlude pt -> SingleTerm <$> genPostlude pt
@@ -390,13 +389,13 @@ genForCTree node = annotateTerm node $ case node of
   CTree.KV key value _cut -> genKV key value
   CTree.Occur item occurs ->
     applyOccurenceIndicator occurs (genForCTree item)
-  CTree.Range from to bounds -> genRange from to bounds
+  CTree.Range from to bounds -> simpleGen $ genRange from to bounds
   CTree.Control op target controller -> genControl op target controller
   CTree.Enum tree -> genEnum tree
   CTree.Unwrap n -> genForCTree n
   CTree.Tag t n -> genTag t n
   CTree.CTreeE (GenRef n) -> genForNode n
-  CTree.CTreeE (GenGenerator gen _) -> tgGenerator gen
+  CTree.CTreeE (GenGenerator gen _) -> gen
   CTree.CTreeE (GenValidator _ x) -> genForCTree x
 
 isInvalidAgainstNode :: CTreeRoot GenPhase -> Term -> CTree GenPhase -> Bool
@@ -407,8 +406,8 @@ isInvalidAgainstNode cTreeRoot term node =
 
 -- | Generate a map from a list of nodes
 genMap ::
-  HasCallStack => [CTree GenPhase] -> CBORGen RuleTerm
-genMap nodes = do
+  HasCallStack => [CTree GenPhase] -> TermGenerator RuleTerm
+genMap nodes = simpleGen $ do
   let
     elemsNeeded KV {} = 1
     elemsNeeded (Occur _ OIOneOrMore) = 1
@@ -429,7 +428,7 @@ genMap nodes = do
         canonicalKeys = toCanonical . fst <$> m
         unS (SingleTerm x) = x
         unS x = error $ "Expected single, got " <> show x
-        genFromNode n = unS <$> scale (`div` 2) (genForCTree n)
+        genFromNode n = unS <$> scale (`div` 2) (tgGenerator $ genForCTree n)
         go !n
           | n > 0 = do
               k <- genFromNode kNode #! "key"
@@ -519,34 +518,37 @@ genMap nodes = do
     Nothing -> error "Failed to generate unique keys for map after max retries"
 
 -- | Generate an array from a list of nodes
-genArray :: HasCallStack => [CTree GenPhase] -> CBORGen RuleTerm
-genArray nodes = do
-  items <-
-    singleTermList . flattenWrappedList
-      <$> zipWithM
-        (\i node -> annotate (T.pack $ show i) $ genForCTree node)
-        [0 :: Int ..]
-        nodes
-  case items of
-    Just ts -> do
-      cTreeRoot <- asks $ gcRoot . geConfig
-      SingleTerm
-        <$> twiddleArray ts ||! do
-          let
-            genCorruptedList = do
-              idx <- choose (0, length ts)
-              junkElem <- genTerm
+genArray :: HasCallStack => [CTree GenPhase] -> TermGenerator RuleTerm
+genArray nodes = simpleGen generator
+  where
+    generator :: CBORGen RuleTerm
+    generator = do
+      items <-
+        singleTermList . flattenWrappedList
+          <$> zipWithM
+            (\i node -> annotate (T.pack $ show i) . tgGenerator $ genForCTree node)
+            [0 :: Int ..]
+            nodes
+      case items of
+        Just ts -> do
+          cTreeRoot <- asks $ gcRoot . geConfig
+          SingleTerm
+            <$> twiddleArray ts ||! do
               let
-                (lInit, lTail) = splitAt idx ts
-              twiddleArray $ lInit <> [junkElem] <> lTail
-          genCorruptedList `suchThat` \l -> isInvalidAgainstNode cTreeRoot l (Array nodes)
-    Nothing -> error "Something weird happened which shouldn't be possible"
+                genCorruptedList = do
+                  idx <- choose (0, length ts)
+                  junkElem <- genTerm
+                  let
+                    (lInit, lTail) = splitAt idx ts
+                  twiddleArray $ lInit <> [junkElem] <> lTail
+              genCorruptedList `suchThat` \l -> isInvalidAgainstNode cTreeRoot l (Array nodes)
+        Nothing -> error "Something weird happened which shouldn't be possible"
 
 -- | Generate a key-value pair
-genKV :: HasCallStack => CTree GenPhase -> CTree GenPhase -> CBORGen RuleTerm
-genKV key value = do
-  kg <- annotate "key" $ genForCTree key
-  vg <- annotate "value" $ genForCTree value
+genKV :: HasCallStack => CTree GenPhase -> CTree GenPhase -> TermGenerator RuleTerm
+genKV key value = simpleGen $ do
+  kg <- annotate "key" . tgGenerator $ genForCTree key
+  vg <- annotate "value" . tgGenerator $ genForCTree value
   case (kg, vg) of
     (SingleTerm k, SingleTerm v) -> pure $ PairTerm k v
     _ ->
@@ -564,8 +566,8 @@ genRange ::
   RangeBound ->
   CBORGen RuleTerm
 genRange from to bounds = do
-  term1 <- dropNegativeGen $ genForCTree from
-  term2 <- dropNegativeGen $ genForCTree to
+  term1 <- dropNegativeGen . tgGenerator $ genForCTree from
+  term2 <- dropNegativeGen . tgGenerator $ genForCTree to
   case (term1, term2) of
     (SingleTerm (TInt a), SingleTerm (TInt b))
       | a <= b -> genBetween (range bounds a b) <&> SingleTerm . TInt
@@ -588,74 +590,64 @@ genControl ::
   CtlOp.CtlOp ->
   CTree GenPhase ->
   CTree GenPhase ->
-  CBORGen RuleTerm
-genControl op target controller = annotateTerm target $ do
-  resolvedController <- case controller of
-    CTreeE (GenRef n) -> dropNegativeGen $ resolveRef n
-    x -> pure x
-  case (op, resolvedController) of
-    (CtlOp.Le, CTree.Literal (Value (VUInt n) _)) -> case target of
-      CTree.Postlude PTUInt -> SingleTerm . TInteger <$> choose (0, fromIntegral n)
-      _ -> error "Cannot apply le operator to target"
-    (CtlOp.Le, _) -> error $ "Invalid controller for .le operator: " <> showSimple controller
-    (CtlOp.Lt, CTree.Literal (Value (VUInt n) _)) -> case target of
-      CTree.Postlude PTUInt -> SingleTerm . TInteger <$> choose (0, fromIntegral n - 1)
-      _ -> error "Cannot apply lt operator to target"
-    (CtlOp.Lt, _) -> error $ "Invalid controller for .lt operator: " <> showSimple controller
-    (CtlOp.Size, CTree.Literal (Value (VUInt s) _)) -> do
-      s' <- pure s |! sized (\sz -> choose (0, fromIntegral sz) `suchThat` (/= s))
-      genSized s' target
-    (CtlOp.Size, CTree.Range {CTree.from, CTree.to}) ->
-      case (from, to) of
-        (CTree.Literal (Value (VUInt f) _), CTree.Literal (Value (VUInt t) _)) -> do
-          s <- sized $ \sz ->
-            antiChoose
-              (fromIntegral f, fromIntegral t)
-              (0, max (succ t) $ fromIntegral sz)
-          genSized s target
-        _ ->
-          error $
-            "Invalid controller for .size operator: "
-              <> showSimple controller
-    (CtlOp.Size, _) ->
-      error $
-        "Invalid controller for .size operator: "
-          <> showSimple controller
-    (CtlOp.Cbor, _) -> do
-      enc <- genForCTree controller
-      case enc of
-        SingleTerm x -> fmap SingleTerm . twiddleBytes $ CBOR.toStrictByteString (CBOR.encodeTerm x)
-        _ -> error "Controller does not correspond to a single term"
-    (c, _) -> error $ "Controller not yet implemented: " <> show c
+  TermGenerator RuleTerm
+genControl op target controller = constrain constraint (genForCTree target)
+  where
+    constraint = case op of
+      CtlOp.Size -> Gen.Size $ Interval _ _
+      CtlOp.Bits -> Gen.Bits _
+      CtlOp.Regexp -> Gen.Regexp _
+      CtlOp.Cbor -> Gen.Cbor _
+      CtlOp.Cborseq -> Gen.Cborseq _
+      CtlOp.Within -> Gen.Within _
+      CtlOp.And -> Gen.And _
+      CtlOp.Lt -> Gen.Range _
+      CtlOp.Le -> Gen.Range _
+      CtlOp.Gt -> Gen.Range _
+      CtlOp.Ge -> Gen.Range _
+      CtlOp.Eq -> Gen.Eq _
+      CtlOp.Ne -> Gen.Neq _
+      CtlOp.Default -> Gen.Default _
 
 -- | Generate a value from an enum
-genEnum :: HasCallStack => CTree GenPhase -> CBORGen RuleTerm
-genEnum tree = case tree of
+genEnum :: HasCallStack => CTree GenPhase -> TermGenerator RuleTerm
+genEnum tree = simpleGen $ case tree of
   CTree.Group trees -> do
     ix <- choose (0, length trees - 1)
-    genForCTree $ trees !! ix
+    tgGenerator $ genForCTree $ trees !! ix
   _ -> error "Attempt to form an enum from something other than a group"
 
 -- | Generate a tagged value
-genTag :: HasCallStack => Word64 -> CTree GenPhase -> CBORGen RuleTerm
-genTag t node = do
+genTag :: HasCallStack => Word64 -> CTree GenPhase -> TermGenerator RuleTerm
+genTag t node = simpleGen $ do
   omitTag <- faultyBool False
   if omitTag
-    then genForCTree node
+    then tgGenerator $ genForCTree node
     else do
       tag <- faultyNum t
       enc <- case tag of
         n
           | n == 2 || n == 3 ->
               -- TODO remove this once `cborg` can decode indefinite bytes in bignums
-              withTwiddle (\c -> c {tcBytes = DefiniteOnly}) $ genForCTree node
-        _ -> genForCTree node
+              withTwiddle (\c -> c {tcBytes = DefiniteOnly}) . tgGenerator $ genForCTree node
+        _ -> tgGenerator $ genForCTree node
       case enc of
         SingleTerm x -> pure $ SingleTerm $ TTagged tag x
         _ -> error "Tag controller does not correspond to a single term"
 
-genForNode :: HasCallStack => Name -> CBORGen RuleTerm
-genForNode = genForCTree <=< resolveRef
+genForNode :: HasCallStack => Name -> TermGenerator RuleTerm
+genForNode name = go mempty
+  where
+    go :: [GenConstraint] -> TermGenerator RuleTerm
+    go constraints =
+      TermGenerator
+        { tgGenerator = do
+            rule <- resolveRef name
+            let
+              termGen = genForCTree rule
+            tgGenerator $ foldr' constrain termGen constraints
+        , tgConstrain = \c -> Just $ go $ c : constraints
+        }
 
 -- | Take a reference and resolve it to the relevant Tree, following multiple
 -- links if necessary.
@@ -682,7 +674,7 @@ generateFromName n = do
   case mRule of
     Nothing -> error $ "Unbound reference: " <> show n
     Just val ->
-      genForCTree val >>= \case
+      tgGenerator (genForCTree val) >>= \case
         SingleTerm x -> pure x
         _ ->
           error $
@@ -698,7 +690,7 @@ generateFromGRef ref = do
   mRule <- lookupGRef ref
   case mRule of
     Nothing -> error $ "Unbound generic reference: " <> show ref
-    Just val -> genForCTree val
+    Just val -> tgGenerator $ genForCTree val
 
 sizeBiasedBool :: MonadGen m => m Bool
 sizeBiasedBool = sized $ \sz -> (> 1) <$> choose (0, sz)
@@ -716,28 +708,27 @@ listOfScaled1 g = sized $ \sz -> do
 -- | Apply an occurence indicator to a group entry
 applyOccurenceIndicator ::
   OccurrenceIndicator ->
-  CBORGen RuleTerm ->
-  CBORGen RuleTerm
-applyOccurenceIndicator OIOptional oldGen =
-  sizeBiasedBool >>= \case
-    False -> pure $ GroupTerm mempty
-    True -> oldGen
-applyOccurenceIndicator OIZeroOrMore oldGen =
-  GroupTerm <$> listOfScaled oldGen
-applyOccurenceIndicator OIOneOrMore oldGen =
-  GroupTerm <$> listOfScaled1 oldGen
-applyOccurenceIndicator (OIBounded mlb mub) oldGen =
-  sized $ \sz -> do
-    let
-      lb = fromMaybe 0 mlb
-      ub = fromMaybe (lb + fromIntegral sz) mub
-    i <- fromIntegral <$> genBetween (lb, ub)
-    GroupTerm <$> vectorOf i (scale (`div` (i + 1)) oldGen)
+  TermGenerator RuleTerm ->
+  TermGenerator RuleTerm
+applyOccurenceIndicator oi oldGen = simpleGen $ case oi of
+  OIOptional ->
+    sizeBiasedBool >>= \case
+      False -> pure $ GroupTerm mempty
+      True -> tgGenerator oldGen
+  OIZeroOrMore -> GroupTerm <$> listOfScaled (tgGenerator oldGen)
+  OIOneOrMore -> GroupTerm <$> listOfScaled1 (tgGenerator oldGen)
+  OIBounded mlb mub ->
+    sized $ \sz -> do
+      let
+        lb = fromMaybe 0 mlb
+        ub = fromMaybe (lb + fromIntegral sz) mub
+      i <- fromIntegral <$> genBetween (lb, ub)
+      GroupTerm <$> vectorOf i (scale (`div` (i + 1)) (tgGenerator oldGen))
 
-valueToTerm :: Value -> CBORGen Term
-valueToTerm (Value x _) = valueVariantToTerm x
+valueToTerm :: Value -> TermGenerator Term
+valueToTerm (Value x _) = simpleGen $ valueVariantToTerm x
 
-valueVariantToTerm :: ValueVariant -> CBORGen Term
+valueVariantToTerm :: MonadGen m => ValueVariant -> m Term
 valueVariantToTerm (VUInt i)
   | toInteger i <= toInteger (maxBound :: Int) = pure $ TInt (fromIntegral i)
   | otherwise = pure $ TInteger (fromIntegral i)
