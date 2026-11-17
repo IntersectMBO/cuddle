@@ -52,13 +52,13 @@ import Codec.CBOR.Cuddle.CDDL.Custom.Core (MonadCddl (..), RuleTerm (..))
 import Codec.CBOR.Cuddle.CDDL.Custom.Generator (
   CBORGen,
   GenConfig (..),
-  GenConstraint,
   GenEnv (..),
   GenPhase,
   TermGenerator (..),
   TwiddleConfig (..),
   TwiddlePolicy (..),
   constrain,
+  deferGen,
   isDefiniteAllowed,
   isIndefiniteAllowed,
   rangeInInterval,
@@ -80,10 +80,10 @@ import Control.Monad.Reader (asks)
 import Data.ByteString (ByteString)
 import Data.ByteString.Lazy qualified as LBS
 import Data.Char (chr)
-import Data.Foldable (Foldable (..))
 import Data.Functor ((<&>))
 import Data.List (sortOn)
 import Data.List.NonEmpty qualified as NE
+import Data.Map.Strict qualified as Map
 import Data.Maybe (fromMaybe)
 import Data.Ord (Down (..))
 import Data.Set qualified as Set
@@ -288,7 +288,7 @@ genTextTerm = go maxBound
             n <- choose (0, min maxSize sz)
             twiddleText =<< genNBytesText n
         , tgConstrain = \case
-            Interval.Size s -> Just $ go $ min maxSize $ fromIntegral s
+            Interval.Size s -> go . min maxSize . fromIntegral <$> evalInteger s
             _ -> Nothing
         }
 
@@ -622,34 +622,44 @@ genRange from to bounds = do
       | a <= b -> choose (range bounds a b) <&> SingleTerm . TDouble
     (a, b) -> error $ "invalid range (a = " <> show a <> ", b = " <> show b <> ")"
 
-evalDouble :: CTree GenPhase -> CBORGen Double
+-- | Replace every rule reference with the rule it names. The result is built
+-- lazily, so a reference to a recursive rule is only unfolded as far as it is
+-- inspected.
+inlineRefs :: CTreeRoot GenPhase -> CTree GenPhase -> CTree GenPhase
+inlineRefs root@(CTreeRoot rules) = foldCTree inlineExt (inlineRefs root)
+  where
+    inlineExt = \case
+      GenRef n ->
+        inlineRefs root . fromMaybe (error $ "Unbound reference: " <> show n) $ Map.lookup n rules
+      GenGenerator g t -> CTreeE . GenGenerator g $ inlineRefs root t
+      GenValidator v t -> CTreeE . GenValidator v $ inlineRefs root t
+
+evalDouble :: CTree GenPhase -> Maybe Double
 evalDouble = \case
   Literal (Value var _)
-    | VFloat16 x <- var -> pure $ float2Double x
-    | VFloat32 x <- var -> pure $ float2Double x
-    | VFloat64 x <- var -> pure x
+    | VFloat16 x <- var -> Just $ float2Double x
+    | VFloat32 x <- var -> Just $ float2Double x
+    | VFloat64 x <- var -> Just x
   CTreeE (GenGenerator _ t) -> evalDouble t
   CTreeE (GenValidator _ t) -> evalDouble t
-  CTreeE (GenRef n) -> evalDouble =<< resolveRef n
-  _ -> error "Expected a double"
+  _ -> Nothing
 
-evalInteger :: CTree GenPhase -> CBORGen Integer
+evalInteger :: CTree GenPhase -> Maybe Integer
 evalInteger = \case
   Literal (Value var _)
-    | VUInt x <- var -> pure $ toInteger x
-    | VNInt x <- var -> pure . negate $ toInteger x
+    | VUInt x <- var -> Just $ toInteger x
+    | VNInt x <- var -> Just . negate $ toInteger x
+    | VBignum x <- var -> Just x
   CTreeE (GenGenerator _ t) -> evalInteger t
   CTreeE (GenValidator _ t) -> evalInteger t
-  CTreeE (GenRef n) -> evalInteger =<< resolveRef n
-  _ -> error "Expected an integer"
+  _ -> Nothing
 
-evalArray :: (CTree GenPhase -> CBORGen a) -> CTree GenPhase -> CBORGen [a]
+evalArray :: (CTree GenPhase -> Maybe a) -> CTree GenPhase -> Maybe [a]
 evalArray f = \case
-  Array es -> foldMap (fmap (: []) . f) es
+  Array es -> traverse f es
   CTreeE (GenGenerator _ t) -> evalArray f t
   CTreeE (GenValidator _ t) -> evalArray f t
-  CTreeE (GenRef n) -> evalArray f =<< resolveRef n
-  _ -> error "Expected an array"
+  _ -> Nothing
 
 -- | Generate a value with a control operator applied
 genControl ::
@@ -658,23 +668,28 @@ genControl ::
   CTree GenPhase ->
   CTree GenPhase ->
   TermGenerator RuleTerm
-genControl op target controller = constrain constraint (genForCTree target)
+genControl op target controller = deferGen $ do
+  -- The controller may name other rules, which can only be looked up while
+  -- generating
+  root <- asks $ gcRoot . geConfig
+  pure $ constrain (constraint $ inlineRefs root controller) (genForCTree target)
   where
-    constraint = case op of
-      CtlOp.Size -> Gen.Size controller
+    constraint ctl = case op of
+      CtlOp.Size -> Gen.Size ctl
       CtlOp.Bits -> error "Not yet implemented"
       CtlOp.Regexp -> error "Not yet implemented"
+      -- Generated from rather than evaluated, so it keeps its references
       CtlOp.Cbor -> Gen.Cbor controller
       CtlOp.Cborseq -> error "Not yet implemented"
       CtlOp.Within -> error "Not yet implemented"
       CtlOp.And -> error "Not yet implemented"
-      CtlOp.Lt -> Gen.Range $ Interval.lessThan controller
-      CtlOp.Le -> Gen.Range $ Interval.lessThanOrEqual controller
-      CtlOp.Gt -> Gen.Range $ Interval.greaterThan controller
-      CtlOp.Ge -> Gen.Range $ Interval.greaterThanOrEqual controller
-      CtlOp.Eq -> Gen.Eq controller
-      CtlOp.Ne -> Gen.Neq controller
-      CtlOp.Default -> Gen.Default controller
+      CtlOp.Lt -> Gen.Range $ Interval.lessThan ctl
+      CtlOp.Le -> Gen.Range $ Interval.lessThanOrEqual ctl
+      CtlOp.Gt -> Gen.Range $ Interval.greaterThan ctl
+      CtlOp.Ge -> Gen.Range $ Interval.greaterThanOrEqual ctl
+      CtlOp.Eq -> Gen.Eq ctl
+      CtlOp.Ne -> Gen.Neq ctl
+      CtlOp.Default -> Gen.Default ctl
 
 -- | Generate a value from an enum
 genEnum :: HasCallStack => CTree GenPhase -> TermGenerator RuleTerm
@@ -703,18 +718,7 @@ genTag t node = simpleGen $ do
         _ -> error "Tag controller does not correspond to a single term"
 
 genForNode :: HasCallStack => Name -> TermGenerator RuleTerm
-genForNode name = go mempty
-  where
-    go :: [GenConstraint] -> TermGenerator RuleTerm
-    go constraints =
-      TermGenerator
-        { tgGenerator = do
-            rule <- resolveRef name
-            let
-              termGen = genForCTree rule
-            tgGenerator $ foldr' constrain termGen constraints
-        , tgConstrain = \c -> Just $ go $ c : constraints
-        }
+genForNode name = deferGen $ genForCTree <$> resolveRef name
 
 -- | Take a reference and resolve it to the relevant Tree, following multiple
 -- links if necessary.

@@ -18,6 +18,7 @@ module Codec.CBOR.Cuddle.CDDL.Custom.Generator (
   TermGenerator (..),
   simpleGen,
   constrain,
+  deferGen,
 
   -- * Twiddling
   TwiddleConfig (..),
@@ -330,3 +331,17 @@ constrain :: GenConstraint -> TermGenerator a -> TermGenerator a
 constrain c (TermGenerator _ f) = case f c of
   Just g -> g
   Nothing -> error "Failed to apply constraint"
+
+-- | A 'TermGenerator' that can only be built while generating, for example
+-- because building it needs to look up a rule. Constraints applied to it are
+-- kept and applied in order once it has been built.
+deferGen :: CBORGen (TermGenerator a) -> TermGenerator a
+deferGen mkGen = go []
+  where
+    go cs =
+      TermGenerator
+        { tgGenerator = do
+            g <- mkGen
+            tgGenerator $ foldr constrain g cs
+        , tgConstrain = \c -> Just . go $ c : cs
+        }
