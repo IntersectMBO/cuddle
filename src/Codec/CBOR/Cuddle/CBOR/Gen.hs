@@ -83,7 +83,6 @@ import Data.Char (chr)
 import Data.Functor ((<&>))
 import Data.List (sortOn)
 import Data.List.NonEmpty qualified as NE
-import Data.Map.Strict qualified as Map
 import Data.Maybe (fromMaybe)
 import Data.Ord (Down (..))
 import Data.Set qualified as Set
@@ -98,8 +97,6 @@ import Data.Word (Word64, Word8)
 import GHC.Float (double2Float, float2Double)
 import GHC.Stack (HasCallStack)
 import Numeric.Half (fromHalf, toHalf)
-import Prettyprinter (Pretty (..), layoutCompact)
-import Prettyprinter.Render.Text (renderStrict)
 import System.Random.Stateful (Random, StatefulGen (..), runStateGen_, uniformByteStringM)
 import Test.AntiGen (
   MonadAntiGen (..),
@@ -183,16 +180,16 @@ genHalf = go mempty mempty
                     else pure $ fromHalf half
              in gen
         , tgConstrain = \case
-            Gen.Range cRng -> do
+            Gen.Range cRng -> Just $ deferGen $ do
               -- TODO think about the edges
               rng' <- forM cRng $ fmap double2Float . evalDouble
               pure $ go (rng <> rng') exclude
-            Gen.Eq term
-              | Just x <- evalDouble term -> Just $ go (rng <> Interval.singleton (double2Float x)) exclude
-              | otherwise -> Nothing
-            Gen.Neq term
-              | Just x <- evalDouble term -> Just $ go rng $ Set.insert (double2Float x) exclude
-              | otherwise -> Nothing
+            Gen.Eq term -> Just $ deferGen $ do
+              x <- evalDouble term
+              pure $ go (rng <> Interval.singleton (double2Float x)) exclude
+            Gen.Neq term -> Just $ deferGen $ do
+              x <- evalDouble term
+              pure $ go rng $ Set.insert (double2Float x) exclude
             _ -> Nothing
         }
 
@@ -248,17 +245,20 @@ genNBytes :: MonadGen m => Int -> m ByteString
 genNBytes n = liftGen (uniformByteStringM n QC)
 
 genBytesTerm :: TermGenerator Term
-genBytesTerm =
-  TermGenerator
-    { tgGenerator = generator
-    , tgConstrain = \case
-        _ -> Nothing
-    }
+genBytesTerm = go maxBound
   where
-    generator =
-      sized $ \sz -> do
-        numElems <- choose (0, sz)
-        twiddleBytes =<< genNBytes numElems
+    go maxSize =
+      TermGenerator
+        { tgGenerator =
+            sized $ \sz -> do
+              numElems <- choose (0, min maxSize sz)
+              twiddleBytes =<< genNBytes numElems
+        , tgConstrain = \case
+            Gen.Size szRule -> Just $ deferGen $ do
+              sz <- evalInteger szRule
+              pure $ go $ min maxSize $ fromIntegral sz
+            _ -> Nothing
+        }
 
 genCharAtMostBytes :: MonadGen m => Int -> m Char
 genCharAtMostBytes 1 = chr <$> choose (0x00, 0x7F)
@@ -288,7 +288,9 @@ genTextTerm = go maxBound
             n <- choose (0, min maxSize sz)
             twiddleText =<< genNBytesText n
         , tgConstrain = \case
-            Interval.Size s -> go . min maxSize . fromIntegral <$> evalInteger s
+            Gen.Size szRule -> Just $ deferGen $ do
+              sz <- evalInteger szRule
+              pure . go . min maxSize $ fromIntegral sz
             _ -> Nothing
         }
 
@@ -392,27 +394,6 @@ genBetween rng = do
     sizeBounds :: Integral a => (a, a)
     sizeBounds = (0, fromIntegral size)
   antiChoose rng sizeBounds
-
--- | Annotate a generator with the label derived from a CTree node.
--- Control nodes are transparent — the annotation comes from the target inside.
-annotateTerm :: MonadAntiGen m => CTree GenPhase -> m a -> m a
-annotateTerm = \case
-  CTree.Literal _ -> annotate "literal"
-  CTree.Postlude pt -> annotate $ renderStrict . layoutCompact $ pretty pt
-  CTree.Map _ -> annotate "map"
-  CTree.Array _ -> annotate "array"
-  CTree.Choice _ -> id
-  CTree.Group _ -> annotate "group"
-  CTree.KV {} -> annotate "kv"
-  CTree.Occur {} -> id
-  CTree.Range {} -> annotate "range"
-  CTree.Control {} -> id
-  CTree.Enum _ -> annotate "enum"
-  CTree.Unwrap _ -> annotate "unwrap"
-  CTree.Tag {} -> annotate "tag"
-  CTree.CTreeE (GenRef n) -> annotate (unName n)
-  CTree.CTreeE (GenGenerator _ _) -> annotate "custom_generator"
-  CTree.CTreeE (GenValidator _ _) -> id
 
 genForCTree :: HasCallStack => CTree GenPhase -> TermGenerator RuleTerm
 genForCTree node = case node of
@@ -622,44 +603,35 @@ genRange from to bounds = do
       | a <= b -> choose (range bounds a b) <&> SingleTerm . TDouble
     (a, b) -> error $ "invalid range (a = " <> show a <> ", b = " <> show b <> ")"
 
--- | Replace every rule reference with the rule it names. The result is built
--- lazily, so a reference to a recursive rule is only unfolded as far as it is
--- inspected.
-inlineRefs :: CTreeRoot GenPhase -> CTree GenPhase -> CTree GenPhase
-inlineRefs root@(CTreeRoot rules) = foldCTree inlineExt (inlineRefs root)
-  where
-    inlineExt = \case
-      GenRef n ->
-        inlineRefs root . fromMaybe (error $ "Unbound reference: " <> show n) $ Map.lookup n rules
-      GenGenerator g t -> CTreeE . GenGenerator g $ inlineRefs root t
-      GenValidator v t -> CTreeE . GenValidator v $ inlineRefs root t
-
-evalDouble :: CTree GenPhase -> Maybe Double
+evalDouble :: CTree GenPhase -> CBORGen Double
 evalDouble = \case
   Literal (Value var _)
-    | VFloat16 x <- var -> Just $ float2Double x
-    | VFloat32 x <- var -> Just $ float2Double x
-    | VFloat64 x <- var -> Just x
+    | VFloat16 x <- var -> pure $ float2Double x
+    | VFloat32 x <- var -> pure $ float2Double x
+    | VFloat64 x <- var -> pure x
   CTreeE (GenGenerator _ t) -> evalDouble t
   CTreeE (GenValidator _ t) -> evalDouble t
-  _ -> Nothing
+  CTreeE (GenRef n) -> evalDouble =<< resolveRef n
+  _ -> error "Expected double"
 
-evalInteger :: CTree GenPhase -> Maybe Integer
+evalInteger :: CTree GenPhase -> CBORGen Integer
 evalInteger = \case
   Literal (Value var _)
-    | VUInt x <- var -> Just $ toInteger x
-    | VNInt x <- var -> Just . negate $ toInteger x
-    | VBignum x <- var -> Just x
+    | VUInt x <- var -> pure $ toInteger x
+    | VNInt x <- var -> pure . negate $ toInteger x
+    | VBignum x <- var -> pure x
   CTreeE (GenGenerator _ t) -> evalInteger t
   CTreeE (GenValidator _ t) -> evalInteger t
-  _ -> Nothing
+  CTreeE (GenRef n) -> evalInteger =<< resolveRef n
+  _ -> error "Expected integer"
 
-evalArray :: (CTree GenPhase -> Maybe a) -> CTree GenPhase -> Maybe [a]
+evalArray :: (CTree GenPhase -> CBORGen a) -> CTree GenPhase -> CBORGen [a]
 evalArray f = \case
   Array es -> traverse f es
   CTreeE (GenGenerator _ t) -> evalArray f t
   CTreeE (GenValidator _ t) -> evalArray f t
-  _ -> Nothing
+  CTreeE (GenRef n) -> evalArray f =<< resolveRef n
+  _ -> error "Expected array"
 
 -- | Generate a value with a control operator applied
 genControl ::
@@ -669,10 +641,7 @@ genControl ::
   CTree GenPhase ->
   TermGenerator RuleTerm
 genControl op target controller = deferGen $ do
-  -- The controller may name other rules, which can only be looked up while
-  -- generating
-  root <- asks $ gcRoot . geConfig
-  pure $ constrain (constraint $ inlineRefs root controller) (genForCTree target)
+  pure $ constrain (constraint controller) (genForCTree target)
   where
     constraint ctl = case op of
       CtlOp.Size -> Gen.Size ctl
