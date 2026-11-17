@@ -54,24 +54,19 @@ import Codec.CBOR.Cuddle.CDDL.Custom.Generator (
   GenConfig (..),
   GenEnv (..),
   GenPhase,
-  Interval (..),
-  IntervalBound (..),
   TermGenerator (..),
   TwiddleConfig (..),
   TwiddlePolicy (..),
   constrain,
   deferGen,
   genFromInterval,
-  greaterThanOrEqual,
   isDefiniteAllowed,
   isIndefiniteAllowed,
-  lessThanOrEqual,
   rangeInInterval,
   simpleGen,
   withTwiddle,
  )
 import Codec.CBOR.Cuddle.CDDL.Custom.Generator qualified as Gen
-import Codec.CBOR.Cuddle.CDDL.Custom.Generator qualified as Interval
 import Codec.CBOR.Cuddle.CDDL.Custom.Validator (
   CustomValidatorResult (..),
   ValidatorPhase,
@@ -79,6 +74,16 @@ import Codec.CBOR.Cuddle.CDDL.Custom.Validator (
  )
 import Codec.CBOR.Cuddle.CDDL.Resolve (XXCTree (..), showSimple)
 import Codec.CBOR.Cuddle.IndexMappable (IndexMappable (..))
+import Codec.CBOR.Cuddle.Interval (
+  Interval (..),
+  IntervalBound (..),
+  greaterThanOrEqual,
+  intersect,
+  lessThanOrEqual,
+  universe,
+  (..=),
+ )
+import Codec.CBOR.Cuddle.Interval qualified as Interval
 import Codec.CBOR.Term (Term (..))
 import Codec.CBOR.Term qualified as CBOR
 import Codec.CBOR.Write qualified as CBOR
@@ -175,7 +180,7 @@ simple =
   [23]
 
 genHalf :: TermGenerator Float
-genHalf = go mempty mempty
+genHalf = go universe mempty
   where
     go rng exclude =
       TermGenerator
@@ -190,10 +195,10 @@ genHalf = go mempty mempty
             Gen.Range cRng -> Just $ deferGen $ do
               -- TODO think about the edges
               rng' <- forM cRng $ fmap double2Float . evalDouble
-              pure $ go (rng <> rng') exclude
+              pure $ go (rng `intersect` rng') exclude
             Gen.Eq term -> Just $ deferGen $ do
               x <- evalDouble term
-              pure $ go (rng <> Interval.singleton (double2Float x)) exclude
+              pure $ go (rng `intersect` Interval.singleton (double2Float x)) exclude
             Gen.Neq term -> Just $ deferGen $ do
               x <- evalDouble term
               pure $ go rng $ Set.insert (double2Float x) exclude
@@ -258,7 +263,7 @@ capAtSize sz int
   | Interval.isEmpty capped = int
   | otherwise = capped
   where
-    capped = int <> lessThanOrEqual sz
+    capped = int `intersect` lessThanOrEqual sz
 
 genBytesTerm :: TermGenerator Term
 genBytesTerm = go Nothing $ greaterThanOrEqual 0
@@ -278,7 +283,7 @@ genBytesTerm = go Nothing $ greaterThanOrEqual 0
         , tgConstrain = \case
             Gen.Size rngRule -> Just $ deferGen $ do
               newRange <- evalInterval evalInteger rngRule
-              pure $ go mCbor $ szRange <> fmap fromIntegral newRange
+              pure $ go mCbor $ szRange `intersect` fmap fromIntegral newRange
             Gen.Cbor cbor
               -- Only allow constraining with .cbor once
               | Nothing <- mCbor -> Just $ go (Just cbor) szRange
@@ -315,7 +320,7 @@ genTextTerm = go $ greaterThanOrEqual 0
         , tgConstrain = \case
             Gen.Size rngRule -> Just $ deferGen $ do
               newRange <- evalInterval evalInteger rngRule
-              pure . go $ sizeRange <> fmap fromIntegral newRange
+              pure . go $ sizeRange `intersect` fmap fromIntegral newRange
             _ -> Nothing
         }
 
@@ -354,16 +359,16 @@ genInteger validRng invalidRng = go validRng mempty
             x <- rangeInInterval invalidRng validInterval `suchThat` (`Set.notMember` excluded)
             pure $ TInteger x
         , tgConstrain = \case
-            Interval.Size szRule -> Just $ deferGen $ do
+            Gen.Size szRule -> Just $ deferGen $ do
               sz <- evalInteger szRule
-              pure $ go (validInterval <> lessThanOrEqual (2 ^ sz)) excluded
-            Interval.Range intRule -> Just $ deferGen $ do
+              pure $ go (validInterval `intersect` lessThanOrEqual (2 ^ sz)) excluded
+            Gen.Range intRule -> Just $ deferGen $ do
               int <- traverse evalInteger intRule
-              pure $ go (validInterval <> int) excluded
-            Interval.Eq r -> Just $ deferGen $ do
+              pure $ go (validInterval `intersect` int) excluded
+            Gen.Eq r -> Just $ deferGen $ do
               x <- evalInteger r
-              pure $ go (validInterval <> Interval.singleton x) excluded
-            Interval.Neq r -> Just $ deferGen $ do
+              pure $ go (validInterval `intersect` Interval.singleton x) excluded
+            Gen.Neq r -> Just $ deferGen $ do
               x <- evalInteger r
               pure $ go validInterval $ Set.insert x excluded
             _ -> Nothing
@@ -381,9 +386,9 @@ genPTerm = \case
   PTBool -> simpleGen $ TBool <$> arbitrary
   -- For integers, introduce decision points that sometimes generate
   -- out-of-bounds values
-  PTUInt -> genInteger (Interval (ClosedBound 0) (ClosedBound uintMax)) outOfBounds
-  PTNInt -> genInteger (Interval (ClosedBound nintMin) $ ClosedBound $ -1) outOfBounds
-  PTInt -> genInteger (Interval (ClosedBound nintMin) (ClosedBound uintMax)) outOfBounds
+  PTUInt -> genInteger (0 ..= uintMax) outOfBounds
+  PTNInt -> genInteger (nintMin ..= (-1)) outOfBounds
+  PTInt -> genInteger (nintMin ..= uintMax) outOfBounds
   PTHalf -> THalf <$> genHalf
   PTFloat -> TFloat <$> genFloat
   PTDouble -> TDouble <$> genDouble
