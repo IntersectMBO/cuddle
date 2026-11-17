@@ -80,6 +80,8 @@ import Codec.CBOR.Cuddle.CDDL.Custom.Validator (
 import Codec.CBOR.Cuddle.CDDL.Resolve (XXCTree (..), showSimple)
 import Codec.CBOR.Cuddle.IndexMappable (IndexMappable (..))
 import Codec.CBOR.Term (Term (..))
+import Codec.CBOR.Term qualified as CBOR
+import Codec.CBOR.Write qualified as CBOR
 import Control.Monad (forM, zipWithM)
 import Control.Monad.Reader (asks)
 import Data.ByteString (ByteString)
@@ -259,18 +261,27 @@ capAtSize sz int
     capped = int <> lessThanOrEqual sz
 
 genBytesTerm :: TermGenerator Term
-genBytesTerm = go $ greaterThanOrEqual 0
+genBytesTerm = go Nothing $ greaterThanOrEqual 0
   where
-    go szRange =
+    go mCbor szRange =
       TermGenerator
         { tgGenerator =
-            sized $ \sz -> do
-              numElems <- genFromInterval $ capAtSize sz szRange
-              twiddleBytes =<< genNBytes numElems
+            twiddleBytes =<< case mCbor of
+              Nothing -> sized $ \sz -> do
+                numElems <- genFromInterval $ capAtSize sz szRange
+                genNBytes numElems
+              Just cbor -> do
+                term <- tgGenerator $ genForCTree cbor
+                case term of
+                  SingleTerm t -> pure $ CBOR.toStrictByteString $ CBOR.encodeTerm t
+                  _ -> error "Expected a single term"
         , tgConstrain = \case
             Gen.Size rngRule -> Just $ deferGen $ do
               newRange <- evalInterval evalInteger rngRule
-              pure $ go $ szRange <> fmap fromIntegral newRange
+              pure $ go mCbor $ szRange <> fmap fromIntegral newRange
+            Gen.Cbor cbor
+              -- Only allow constraining with .cbor once
+              | Nothing <- mCbor -> Just $ go (Just cbor) szRange
             _ -> Nothing
         }
 
