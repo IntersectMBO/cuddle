@@ -54,13 +54,18 @@ import Codec.CBOR.Cuddle.CDDL.Custom.Generator (
   GenConfig (..),
   GenEnv (..),
   GenPhase,
+  Interval (..),
+  IntervalBound (..),
   TermGenerator (..),
   TwiddleConfig (..),
   TwiddlePolicy (..),
   constrain,
   deferGen,
+  genFromInterval,
+  greaterThanOrEqual,
   isDefiniteAllowed,
   isIndefiniteAllowed,
+  lessThanOrEqual,
   rangeInInterval,
   simpleGen,
   withTwiddle,
@@ -244,19 +249,28 @@ genTerm =
 genNBytes :: MonadGen m => Int -> m ByteString
 genNBytes n = liftGen (uniformByteStringM n QC)
 
-genBytesTerm :: TermGenerator Term
-genBytesTerm = go maxBound
+-- | Caps a length range at the QuickCheck size, unless that would leave it
+-- empty, in which case the range is returned unchanged.
+capAtSize :: Int -> Interval Int -> Interval Int
+capAtSize sz int
+  | Interval.isEmpty capped = int
+  | otherwise = capped
   where
-    go maxSize =
+    capped = int <> lessThanOrEqual sz
+
+genBytesTerm :: TermGenerator Term
+genBytesTerm = go $ greaterThanOrEqual 0
+  where
+    go szRange =
       TermGenerator
         { tgGenerator =
             sized $ \sz -> do
-              numElems <- choose (0, min maxSize sz)
+              numElems <- genFromInterval $ capAtSize sz szRange
               twiddleBytes =<< genNBytes numElems
         , tgConstrain = \case
-            Gen.Size szRule -> Just $ deferGen $ do
-              sz <- evalInteger szRule
-              pure $ go $ min maxSize $ fromIntegral sz
+            Gen.Size rngRule -> Just $ deferGen $ do
+              newRange <- evalInterval evalInteger rngRule
+              pure $ go $ szRange <> fmap fromIntegral newRange
             _ -> Nothing
         }
 
@@ -280,17 +294,17 @@ genNBytesText n = do
   pure . LT.toStrict $ toLazyText builder
 
 genTextTerm :: TermGenerator Term
-genTextTerm = go maxBound
+genTextTerm = go $ greaterThanOrEqual 0
   where
-    go maxSize =
+    go sizeRange =
       TermGenerator
         { tgGenerator = sized $ \sz -> do
-            n <- choose (0, min maxSize sz)
+            n <- genFromInterval $ capAtSize sz sizeRange
             twiddleText =<< genNBytesText n
         , tgConstrain = \case
-            Gen.Size szRule -> Just $ deferGen $ do
-              sz <- evalInteger szRule
-              pure . go . min maxSize $ fromIntegral sz
+            Gen.Size rngRule -> Just $ deferGen $ do
+              newRange <- evalInterval evalInteger rngRule
+              pure . go $ sizeRange <> fmap fromIntegral newRange
             _ -> Nothing
         }
 
@@ -632,6 +646,16 @@ evalArray f = \case
   CTreeE (GenValidator _ t) -> evalArray f t
   CTreeE (GenRef n) -> evalArray f =<< resolveRef n
   _ -> error "Expected array"
+
+evalInterval :: (CTree GenPhase -> CBORGen a) -> CTree GenPhase -> CBORGen (Interval a)
+evalInterval f = \case
+  Range loRule hiRule bound -> do
+    lo <- f loRule
+    hi <- f hiRule
+    pure $ Interval (ClosedBound lo) $ case bound of
+      ClOpen -> OpenBound hi
+      Closed -> ClosedBound hi
+  x -> Interval.singleton <$> f x
 
 -- | Generate a value with a control operator applied
 genControl ::

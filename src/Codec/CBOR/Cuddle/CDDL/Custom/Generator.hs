@@ -61,6 +61,7 @@ import Data.Maybe (fromMaybe)
 import Data.Set (Set)
 import Data.Text (Text)
 import GHC.Generics (Generic)
+import GHC.Stack (HasCallStack)
 import Optics.Lens (Lens')
 import System.Random (Random)
 import Test.AntiGen (AntiGen, MonadAntiGen (..))
@@ -267,25 +268,32 @@ instance Ord a => Monoid (Interval a) where
   mempty = Interval Unbounded Unbounded
 
 genFromInterval ::
-  ( MonadGen m
+  ( HasCallStack
+  , MonadGen m
   , Bounded a
   , Random a
   , Ord a
+  , Show a
   ) =>
   Interval a ->
   m a
 genFromInterval = rangeInInterval (minBound, maxBound)
 
+-- | Generates a value in the interval, using the given bounds in place of
+-- missing boundaries. Fails if the interval is empty (see 'isEmpty').
 rangeInInterval ::
-  ( MonadGen m
+  ( HasCallStack
+  , MonadGen m
   , Random a
   , Ord a
+  , Show a
   ) =>
   (a, a) ->
   Interval a ->
   m a
-rangeInInterval (lb, ub) int@(Interval lo hi) =
-  choose (boundLo, boundHi) `suchThat` contains int
+rangeInInterval (lb, ub) int@(Interval lo hi)
+  | isEmpty int = error $ "rangeInInterval: empty interval " <> show int
+  | otherwise = choose (boundLo, boundHi) `suchThat` contains int
   where
     boundLo = fromMaybe lb $ boundary lo
     boundHi = fromMaybe ub $ boundary hi
