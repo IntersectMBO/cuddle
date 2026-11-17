@@ -23,11 +23,14 @@ module Codec.CBOR.Cuddle.CBOR.Gen (
   twiddleMap,
   twiddleText,
   twiddleBytes,
+  evalDouble,
+  evalInteger,
+  evalArray,
 ) where
 
 #if MIN_VERSION_random(1,3,0)
 #endif
-import Codec.CBOR.Cuddle.CBOR.Canonical (CanonicalTerm (..), nintMin, toCanonical, uintMax)
+import Codec.CBOR.Cuddle.CBOR.Canonical (nintMin, toCanonical, uintMax)
 import Codec.CBOR.Cuddle.CBOR.Validator (validateAgainst)
 import Codec.CBOR.Cuddle.CDDL (
   GRef (..),
@@ -52,12 +55,10 @@ import Codec.CBOR.Cuddle.CDDL.Custom.Generator (
   GenConstraint,
   GenEnv (..),
   GenPhase,
-  Interval (..),
   TermGenerator (..),
   TwiddleConfig (..),
   TwiddlePolicy (..),
   constrain,
-  genFromInterval,
   isDefiniteAllowed,
   isIndefiniteAllowed,
   rangeInInterval,
@@ -74,10 +75,8 @@ import Codec.CBOR.Cuddle.CDDL.Custom.Validator (
 import Codec.CBOR.Cuddle.CDDL.Resolve (XXCTree (..), showSimple)
 import Codec.CBOR.Cuddle.IndexMappable (IndexMappable (..))
 import Codec.CBOR.Term (Term (..))
-import Codec.CBOR.Term qualified as CBOR
-import Codec.CBOR.Write qualified as CBOR
-import Control.Monad (forM, when, zipWithM, (<=<))
-import Control.Monad.Reader (MonadReader, asks)
+import Control.Monad (forM, zipWithM)
+import Control.Monad.Reader (asks)
 import Data.ByteString (ByteString)
 import Data.ByteString.Lazy qualified as LBS
 import Data.Char (chr)
@@ -96,8 +95,9 @@ import Data.Text.Lazy qualified as TL
 import Data.Text.Lazy.Builder (toLazyText)
 import Data.Text.Lazy.Builder qualified as LB
 import Data.Word (Word64, Word8)
+import GHC.Float (double2Float, float2Double)
 import GHC.Stack (HasCallStack)
-import Numeric.Half (Half (..), fromHalf, toHalf)
+import Numeric.Half (fromHalf, toHalf)
 import Prettyprinter (Pretty (..), layoutCompact)
 import Prettyprinter.Render.Text (renderStrict)
 import System.Random.Stateful (Random, StatefulGen (..), runStateGen_, uniformByteStringM)
@@ -184,16 +184,15 @@ genHalf = go mempty mempty
              in gen
         , tgConstrain = \case
             Gen.Range cRng -> do
-              rng' <- forM cRng $ \case
-                CTFloat f -> Just f
-                _ -> Nothing
+              -- TODO think about the edges
+              rng' <- forM cRng $ fmap double2Float . evalDouble
               pure $ go (rng <> rng') exclude
             Gen.Eq term
-              | CTFloat x <- term -> Just $ go (rng <> Interval.singleton x) exclude
+              | Just x <- evalDouble term -> Just $ go (rng <> Interval.singleton (double2Float x)) exclude
               | otherwise -> Nothing
             Gen.Neq term
-              | CTFloat x <- term -> Just $ go rng $ Set.insert x exclude
-              | otherwise -> Just $ go rng exclude
+              | Just x <- evalDouble term -> Just $ go rng $ Set.insert (double2Float x) exclude
+              | otherwise -> Nothing
             _ -> Nothing
         }
 
@@ -289,19 +288,28 @@ genTextTerm = go maxBound
             n <- choose (0, min maxSize sz)
             twiddleText =<< genNBytesText n
         , tgConstrain = \case
-            Interval.Size s -> Just $ go $ min maxSize s
+            Interval.Size s -> Just $ go $ min maxSize $ fromIntegral s
             _ -> Nothing
         }
 
 -- | Primitive types defined by the CDDL specification, with their generators
 genPostlude :: PTerm -> TermGenerator Term
-genPostlude pt = genPTerm =<< faultyPTerm pt
+genPostlude pt = go $ genPTerm pt
   where
+    -- Constraints only reach the generator for @pt@: a term of a different
+    -- type is invalid whatever the control operator says.
+    go tg =
+      TermGenerator
+        { tgGenerator = do
+            p <- faultyPTerm pt
+            tgGenerator $ if p == pt then tg else genPTerm p
+        , tgConstrain = fmap go . tgConstrain tg
+        }
     genExcluding ls =
       elements (filter (`notElem` ls) [minBound .. maxBound])
     nonPInteger p =
       pure p |! genExcluding [PTUInt, PTNInt, PTInt, PTAny]
-    -- \| Introduces a decision point that can change the type of the CBOR term that is generated
+    -- Introduces a decision point that can change the type of the CBOR term that is generated
     faultyPTerm t = reweigh 0.1 $
       case t of
         PTAny -> pure PTAny
@@ -309,26 +317,35 @@ genPostlude pt = genPTerm =<< faultyPTerm pt
         p@PTNInt -> nonPInteger p
         p@PTInt -> nonPInteger p
         p -> pure p |! genExcluding [PTAny, p]
-    genUInt = choose (0, uintMax)
-    genNInt = choose (nintMin, -1)
-    genAboveUInt = choose (uintMax + 1, 2 * uintMax)
-    genBelowNInt = choose (2 * nintMin, nintMin - 1)
-    -- \| Given a CDDL postlude type, generates a value of that type
-    genPTerm = \case
-      PTBool -> simpleGen $ TBool <$> arbitrary
-      -- For integers, introduce decision points that sometimes generate
-      -- out-of-bounds values
-      PTUInt -> TInteger <$> genUInt |! oneof [genNInt, genBelowNInt, genAboveUInt]
-      PTNInt -> TInteger <$> genNInt |! oneof [genUInt, genBelowNInt, genAboveUInt]
-      PTInt -> TInteger <$> choose (nintMin, uintMax)
-      PTHalf -> THalf <$> genHalf
-      PTFloat -> TFloat <$> arbitrary
-      PTDouble -> TDouble <$> arbitrary
-      PTBytes -> genBytesTerm
-      PTText -> genTextTerm
-      PTAny -> simpleGen genTerm
-      PTNil -> simpleGen $ pure TNull
-      PTUndefined -> simpleGen $ pure $ TSimple 23
+
+genInteger :: (Integer, Integer) -> (Integer, Integer) -> TermGenerator Term
+genInteger validRng invalidRng = simpleGen $ TInteger <$> antiChoose validRng invalidRng
+
+genFloat :: TermGenerator Float
+genFloat = simpleGen arbitrary
+
+genDouble :: TermGenerator Double
+genDouble = simpleGen arbitrary
+
+-- | Given a CDDL postlude type, generates a value of that type
+genPTerm :: PTerm -> TermGenerator Term
+genPTerm = \case
+  PTBool -> simpleGen $ TBool <$> arbitrary
+  -- For integers, introduce decision points that sometimes generate
+  -- out-of-bounds values
+  PTUInt -> genInteger (0, uintMax) outOfBounds
+  PTNInt -> genInteger (nintMin, -1) outOfBounds
+  PTInt -> genInteger (nintMin, uintMax) (nintMin, uintMax)
+  PTHalf -> THalf <$> genHalf
+  PTFloat -> TFloat <$> genFloat
+  PTDouble -> TDouble <$> genDouble
+  PTBytes -> genBytesTerm
+  PTText -> genTextTerm
+  PTAny -> simpleGen genTerm
+  PTNil -> simpleGen $ pure TNull
+  PTUndefined -> simpleGen $ pure $ TSimple 23
+  where
+    outOfBounds = (2 * nintMin, 2 * uintMax)
 
 --------------------------------------------------------------------------------
 -- Kinds of terms
@@ -357,13 +374,6 @@ dropNegativeGen = mapAntiGen $ liftGen . runAntiGen
 --------------------------------------------------------------------------------
 -- Generator functions
 --------------------------------------------------------------------------------
-
-genSized :: HasCallStack => Word64 -> CTree GenPhase -> CBORGen RuleTerm
-genSized s target = annotateTerm target $ case target of
-  CTree.Postlude PTText -> fmap SingleTerm . twiddleText =<< genNBytesText (fromIntegral s)
-  CTree.Postlude PTBytes -> fmap SingleTerm . twiddleBytes =<< genNBytes (fromIntegral s)
-  CTree.Postlude PTUInt -> SingleTerm . TInteger <$> choose (0, 256 ^ s - 1)
-  _ -> error "Cannot apply size operator to target "
 
 range :: Enum a => RangeBound -> a -> a -> (a, a)
 range ClOpen x y = (x, pred y)
@@ -612,6 +622,35 @@ genRange from to bounds = do
       | a <= b -> choose (range bounds a b) <&> SingleTerm . TDouble
     (a, b) -> error $ "invalid range (a = " <> show a <> ", b = " <> show b <> ")"
 
+evalDouble :: CTree GenPhase -> CBORGen Double
+evalDouble = \case
+  Literal (Value var _)
+    | VFloat16 x <- var -> pure $ float2Double x
+    | VFloat32 x <- var -> pure $ float2Double x
+    | VFloat64 x <- var -> pure x
+  CTreeE (GenGenerator _ t) -> evalDouble t
+  CTreeE (GenValidator _ t) -> evalDouble t
+  CTreeE (GenRef n) -> evalDouble =<< resolveRef n
+  _ -> error "Expected a double"
+
+evalInteger :: CTree GenPhase -> CBORGen Integer
+evalInteger = \case
+  Literal (Value var _)
+    | VUInt x <- var -> pure $ toInteger x
+    | VNInt x <- var -> pure . negate $ toInteger x
+  CTreeE (GenGenerator _ t) -> evalInteger t
+  CTreeE (GenValidator _ t) -> evalInteger t
+  CTreeE (GenRef n) -> evalInteger =<< resolveRef n
+  _ -> error "Expected an integer"
+
+evalArray :: (CTree GenPhase -> CBORGen a) -> CTree GenPhase -> CBORGen [a]
+evalArray f = \case
+  Array es -> foldMap (fmap (: []) . f) es
+  CTreeE (GenGenerator _ t) -> evalArray f t
+  CTreeE (GenValidator _ t) -> evalArray f t
+  CTreeE (GenRef n) -> evalArray f =<< resolveRef n
+  _ -> error "Expected an array"
+
 -- | Generate a value with a control operator applied
 genControl ::
   HasCallStack =>
@@ -622,20 +661,20 @@ genControl ::
 genControl op target controller = constrain constraint (genForCTree target)
   where
     constraint = case op of
-      CtlOp.Size -> Gen.Size _
-      CtlOp.Bits -> Gen.Bits _
-      CtlOp.Regexp -> Gen.Regexp _
-      CtlOp.Cbor -> Gen.Cbor _
-      CtlOp.Cborseq -> Gen.Cborseq _
-      CtlOp.Within -> Gen.Within _
-      CtlOp.And -> Gen.And _
-      CtlOp.Lt -> Gen.Range _
-      CtlOp.Le -> Gen.Range _
-      CtlOp.Gt -> Gen.Range _
-      CtlOp.Ge -> Gen.Range _
-      CtlOp.Eq -> Gen.Eq _
-      CtlOp.Ne -> Gen.Neq _
-      CtlOp.Default -> Gen.Default _
+      CtlOp.Size -> Gen.Size controller
+      CtlOp.Bits -> error "Not yet implemented"
+      CtlOp.Regexp -> error "Not yet implemented"
+      CtlOp.Cbor -> Gen.Cbor controller
+      CtlOp.Cborseq -> error "Not yet implemented"
+      CtlOp.Within -> error "Not yet implemented"
+      CtlOp.And -> error "Not yet implemented"
+      CtlOp.Lt -> Gen.Range $ Interval.lessThan controller
+      CtlOp.Le -> Gen.Range $ Interval.lessThanOrEqual controller
+      CtlOp.Gt -> Gen.Range $ Interval.greaterThan controller
+      CtlOp.Ge -> Gen.Range $ Interval.greaterThanOrEqual controller
+      CtlOp.Eq -> Gen.Eq controller
+      CtlOp.Ne -> Gen.Neq controller
+      CtlOp.Default -> Gen.Default controller
 
 -- | Generate a value from an enum
 genEnum :: HasCallStack => CTree GenPhase -> TermGenerator RuleTerm
@@ -756,7 +795,7 @@ applyOccurenceIndicator oi oldGen = simpleGen $ case oi of
 valueToTerm :: Value -> TermGenerator Term
 valueToTerm (Value x _) = simpleGen $ valueVariantToTerm x
 
-valueVariantToTerm :: MonadGen m => ValueVariant -> m Term
+valueVariantToTerm :: ValueVariant -> CBORGen Term
 valueVariantToTerm (VUInt i)
   | toInteger i <= toInteger (maxBound :: Int) = pure $ TInt (fromIntegral i)
   | otherwise = pure $ TInteger (fromIntegral i)
@@ -767,8 +806,8 @@ valueVariantToTerm (VBignum i) = pure $ TInteger i
 valueVariantToTerm (VFloat16 i) = pure $ THalf i
 valueVariantToTerm (VFloat32 i) = pure $ TFloat i
 valueVariantToTerm (VFloat64 i) = pure $ TDouble i
-valueVariantToTerm (VText t) = simpleGen $ twiddleText t
-valueVariantToTerm (VBytes b) = simpleGen $ twiddleBytes b
+valueVariantToTerm (VText t) = twiddleText t
+valueVariantToTerm (VBytes b) = twiddleBytes b
 valueVariantToTerm (VBool b) = pure $ TBool b
 
 instance IndexMappable CTree GenPhase ValidatorPhase where

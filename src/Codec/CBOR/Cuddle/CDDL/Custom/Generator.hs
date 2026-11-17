@@ -36,6 +36,10 @@ module Codec.CBOR.Cuddle.CDDL.Custom.Generator (
   -- * Interval
   Interval (..),
   IntervalBound (..),
+  greaterThanOrEqual,
+  greaterThan,
+  lessThanOrEqual,
+  lessThan,
   isEmpty,
   intersect,
   singleton,
@@ -44,7 +48,6 @@ module Codec.CBOR.Cuddle.CDDL.Custom.Generator (
   rangeInInterval,
 ) where
 
-import Codec.CBOR.Cuddle.CBOR.Canonical (CanonicalTerm)
 import Codec.CBOR.Cuddle.CDDL (GRef (..), Name (..))
 import Codec.CBOR.Cuddle.CDDL.CTree (CTree, CTreeRoot (..), XXCTree)
 import Codec.CBOR.Cuddle.CDDL.Custom.Core (MonadCddl (..), RuleTerm)
@@ -196,6 +199,18 @@ boundary = \case
 data Interval a = Interval (IntervalBound a) (IntervalBound a)
   deriving (Eq, Show, Functor, Foldable, Traversable)
 
+greaterThanOrEqual :: a -> Interval a
+greaterThanOrEqual x = Interval (ClosedBound x) Unbounded
+
+greaterThan :: a -> Interval a
+greaterThan x = Interval (OpenBound x) Unbounded
+
+lessThanOrEqual :: a -> Interval a
+lessThanOrEqual x = Interval Unbounded (ClosedBound x)
+
+lessThan :: a -> Interval a
+lessThan x = Interval Unbounded (OpenBound x)
+
 -- | This function checks whether the interval contains any elements. It does
 -- not take the bounds of the type into account, it only checks whether the
 -- lower bound is smaller than the upper bound
@@ -276,15 +291,15 @@ rangeInInterval (lb, ub) int@(Interval lo hi) =
 
 data GenConstraint
   = -- | Constrains the size of a string or bytestring in bytes
-    Size Int
+    Size (CTree GenPhase)
   | -- | Constrains the range of allowed values to the interval. This also covers
     -- the .gt and .lt operators.
-    Range (Interval CanonicalTerm)
-  | Eq CanonicalTerm
-  | Neq CanonicalTerm
-  | Default CanonicalTerm
+    Range (Interval (CTree GenPhase))
+  | Eq (CTree GenPhase)
+  | Neq (CTree GenPhase)
+  | Default (CTree GenPhase)
   | -- | Specifies the indices at which a bit is allowed to be set
-    Bits (Set Int)
+    Bits (Set Integer)
   | -- | Constrains the string to ones that match the regex
     Regexp Regex
   | -- | The bytestring must match the CDDL rule
