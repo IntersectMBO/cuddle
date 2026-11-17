@@ -60,6 +60,7 @@ import Codec.CBOR.Cuddle.CDDL.Custom.Generator (
   genFromInterval,
   isDefiniteAllowed,
   isIndefiniteAllowed,
+  rangeInInterval,
   simpleGen,
   withTwiddle,
  )
@@ -75,8 +76,8 @@ import Codec.CBOR.Cuddle.IndexMappable (IndexMappable (..))
 import Codec.CBOR.Term (Term (..))
 import Codec.CBOR.Term qualified as CBOR
 import Codec.CBOR.Write qualified as CBOR
-import Control.Monad (when, zipWithM, (<=<))
-import Control.Monad.Reader (asks)
+import Control.Monad (forM, when, zipWithM, (<=<))
+import Control.Monad.Reader (MonadReader, asks)
 import Data.ByteString (ByteString)
 import Data.ByteString.Lazy qualified as LBS
 import Data.Char (chr)
@@ -176,13 +177,17 @@ genHalf = go mempty mempty
       TermGenerator
         { tgGenerator =
             let gen = do
-                  half <- toHalf <$> genFromInterval rng `suchThat` (`Set.notMember` exclude)
+                  half <- toHalf <$> rangeInInterval (-65504, 65504) rng `suchThat` (`Set.notMember` exclude)
                   if isDenormalized half
                     then gen
                     else pure $ fromHalf half
              in gen
         , tgConstrain = \case
-            Gen.Range cRng -> Just $ go (rng <> fmap fromIntegral cRng) exclude
+            Gen.Range cRng -> do
+              rng' <- forM cRng $ \case
+                CTFloat f -> Just f
+                _ -> Nothing
+              pure $ go (rng <> rng') exclude
             Gen.Eq term
               | CTFloat x <- term -> Just $ go (rng <> Interval.singleton x) exclude
               | otherwise -> Nothing
@@ -192,22 +197,27 @@ genHalf = go mempty mempty
             _ -> Nothing
         }
 
-genTwiddled :: (TwiddleConfig -> TwiddlePolicy) -> (a -> Term) -> (a -> Term) -> a -> m Term
+genTwiddled ::
+  (TwiddleConfig -> TwiddlePolicy) ->
+  (a -> Term) ->
+  (a -> Term) ->
+  a ->
+  CBORGen Term
 genTwiddled getPolicy definite indefinite term = do
   policy <- asks $ getPolicy . gcTwiddle . geConfig
   elements $
     [definite term | isDefiniteAllowed policy] <> [indefinite term | isIndefiniteAllowed policy]
 
-twiddleArray :: [Term] -> m Term
+twiddleArray :: [Term] -> CBORGen Term
 twiddleArray = genTwiddled tcArrays TList TListI
 
-twiddleMap :: [(Term, Term)] -> m Term
+twiddleMap :: [(Term, Term)] -> CBORGen Term
 twiddleMap = genTwiddled tcMaps TMap TMapI
 
-twiddleText :: Text -> m Term
+twiddleText :: Text -> CBORGen Term
 twiddleText = genTwiddled tcText TString (TStringI . TL.fromStrict)
 
-twiddleBytes :: ByteString -> m Term
+twiddleBytes :: ByteString -> CBORGen Term
 twiddleBytes = genTwiddled tcBytes TBytes (TBytesI . LBS.fromStrict)
 
 genTerm :: CBORGen Term
@@ -238,10 +248,18 @@ genTerm =
 genNBytes :: MonadGen m => Int -> m ByteString
 genNBytes n = liftGen (uniformByteStringM n QC)
 
-genBytes :: MonadGen m => m ByteString
-genBytes = sized $ \sz -> do
-  numElems <- choose (0, sz)
-  genNBytes numElems
+genBytesTerm :: TermGenerator Term
+genBytesTerm =
+  TermGenerator
+    { tgGenerator = generator
+    , tgConstrain = \case
+        _ -> Nothing
+    }
+  where
+    generator =
+      sized $ \sz -> do
+        numElems <- choose (0, sz)
+        twiddleBytes =<< genNBytes numElems
 
 genCharAtMostBytes :: MonadGen m => Int -> m Char
 genCharAtMostBytes 1 = chr <$> choose (0x00, 0x7F)
@@ -262,8 +280,18 @@ genNBytesText n = do
   builder <- go n mempty
   pure . LT.toStrict $ toLazyText builder
 
-genText :: MonadGen m => m Text
-genText = sized $ \sz -> genNBytesText =<< choose (0, sz)
+genTextTerm :: TermGenerator Term
+genTextTerm = go maxBound
+  where
+    go maxSize =
+      TermGenerator
+        { tgGenerator = sized $ \sz -> do
+            n <- choose (0, min maxSize sz)
+            twiddleText =<< genNBytesText n
+        , tgConstrain = \case
+            Interval.Size s -> Just $ go $ min maxSize s
+            _ -> Nothing
+        }
 
 -- | Primitive types defined by the CDDL specification, with their generators
 genPostlude :: PTerm -> TermGenerator Term
@@ -287,7 +315,7 @@ genPostlude pt = genPTerm =<< faultyPTerm pt
     genBelowNInt = choose (2 * nintMin, nintMin - 1)
     -- \| Given a CDDL postlude type, generates a value of that type
     genPTerm = \case
-      PTBool -> TBool <$> arbitrary
+      PTBool -> simpleGen $ TBool <$> arbitrary
       -- For integers, introduce decision points that sometimes generate
       -- out-of-bounds values
       PTUInt -> TInteger <$> genUInt |! oneof [genNInt, genBelowNInt, genAboveUInt]
@@ -296,11 +324,11 @@ genPostlude pt = genPTerm =<< faultyPTerm pt
       PTHalf -> THalf <$> genHalf
       PTFloat -> TFloat <$> arbitrary
       PTDouble -> TDouble <$> arbitrary
-      PTBytes -> twiddleBytes =<< genBytes
-      PTText -> twiddleText =<< genText
+      PTBytes -> genBytesTerm
+      PTText -> genTextTerm
       PTAny -> simpleGen genTerm
-      PTNil -> pure TNull
-      PTUndefined -> pure $ TSimple 23
+      PTNil -> simpleGen $ pure TNull
+      PTUndefined -> simpleGen $ pure $ TSimple 23
 
 --------------------------------------------------------------------------------
 -- Kinds of terms
@@ -377,15 +405,15 @@ annotateTerm = \case
   CTree.CTreeE (GenValidator _ _) -> id
 
 genForCTree :: HasCallStack => CTree GenPhase -> TermGenerator RuleTerm
-genForCTree node = annotateTerm node $ case node of
+genForCTree node = case node of
   CTree.Literal v -> SingleTerm <$> valueToTerm v
   CTree.Postlude pt -> SingleTerm <$> genPostlude pt
   CTree.Map nodes -> genMap nodes
   CTree.Array nodes -> genArray nodes
-  CTree.Choice (NE.toList -> nodes) -> do
+  CTree.Choice (NE.toList -> nodes) -> simpleGen $ do
     ix <- choose (0, length nodes - 1)
-    genForCTree $ nodes !! ix
-  CTree.Group nodes -> GroupTerm <$> traverse genForCTree nodes
+    tgGenerator . genForCTree $ nodes !! ix
+  CTree.Group nodes -> simpleGen $ GroupTerm <$> traverse (tgGenerator . genForCTree) nodes
   CTree.KV key value _cut -> genKV key value
   CTree.Occur item occurs ->
     applyOccurenceIndicator occurs (genForCTree item)
@@ -594,7 +622,7 @@ genControl ::
 genControl op target controller = constrain constraint (genForCTree target)
   where
     constraint = case op of
-      CtlOp.Size -> Gen.Size $ Interval _ _
+      CtlOp.Size -> Gen.Size _
       CtlOp.Bits -> Gen.Bits _
       CtlOp.Regexp -> Gen.Regexp _
       CtlOp.Cbor -> Gen.Cbor _
@@ -739,8 +767,8 @@ valueVariantToTerm (VBignum i) = pure $ TInteger i
 valueVariantToTerm (VFloat16 i) = pure $ THalf i
 valueVariantToTerm (VFloat32 i) = pure $ TFloat i
 valueVariantToTerm (VFloat64 i) = pure $ TDouble i
-valueVariantToTerm (VText t) = twiddleText t
-valueVariantToTerm (VBytes b) = twiddleBytes b
+valueVariantToTerm (VText t) = simpleGen $ twiddleText t
+valueVariantToTerm (VBytes b) = simpleGen $ twiddleBytes b
 valueVariantToTerm (VBool b) = pure $ TBool b
 
 instance IndexMappable CTree GenPhase ValidatorPhase where

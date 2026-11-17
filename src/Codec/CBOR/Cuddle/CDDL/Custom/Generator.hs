@@ -41,6 +41,7 @@ module Codec.CBOR.Cuddle.CDDL.Custom.Generator (
   singleton,
   contains,
   genFromInterval,
+  rangeInInterval,
 ) where
 
 import Codec.CBOR.Cuddle.CBOR.Canonical (CanonicalTerm)
@@ -55,7 +56,6 @@ import Data.Map.Strict qualified as Map
 import Data.Maybe (fromMaybe)
 import Data.Set (Set)
 import Data.Text (Text)
-import Data.Word (Word8)
 import GHC.Generics (Generic)
 import Optics.Lens (Lens')
 import System.Random (Random)
@@ -185,7 +185,7 @@ data IntervalBound a
   = OpenBound a
   | ClosedBound a
   | Unbounded
-  deriving (Eq, Show)
+  deriving (Eq, Show, Functor, Foldable, Traversable)
 
 boundary :: IntervalBound a -> Maybe a
 boundary = \case
@@ -194,7 +194,7 @@ boundary = \case
   ClosedBound x -> Just x
 
 data Interval a = Interval (IntervalBound a) (IntervalBound a)
-  deriving (Eq, Show)
+  deriving (Eq, Show, Functor, Foldable, Traversable)
 
 -- | This function checks whether the interval contains any elements. It does
 -- not take the bounds of the type into account, it only checks whether the
@@ -258,14 +258,25 @@ genFromInterval ::
   ) =>
   Interval a ->
   m a
-genFromInterval int@(Interval lo hi) = choose (boundLo, boundHi) `suchThat` contains int
+genFromInterval = rangeInInterval (minBound, maxBound)
+
+rangeInInterval ::
+  ( MonadGen m
+  , Random a
+  , Ord a
+  ) =>
+  (a, a) ->
+  Interval a ->
+  m a
+rangeInInterval (lb, ub) int@(Interval lo hi) =
+  choose (boundLo, boundHi) `suchThat` contains int
   where
-    boundLo = fromMaybe minBound $ boundary lo
-    boundHi = fromMaybe maxBound $ boundary hi
+    boundLo = fromMaybe lb $ boundary lo
+    boundHi = fromMaybe ub $ boundary hi
 
 data GenConstraint
   = -- | Constrains the size of a string or bytestring in bytes
-    Size (Interval CanonicalTerm)
+    Size Int
   | -- | Constrains the range of allowed values to the interval. This also covers
     -- the .gt and .lt operators.
     Range (Interval CanonicalTerm)
@@ -273,7 +284,7 @@ data GenConstraint
   | Neq CanonicalTerm
   | Default CanonicalTerm
   | -- | Specifies the indices at which a bit is allowed to be set
-    Bits (Set Word8)
+    Bits (Set Int)
   | -- | Constrains the string to ones that match the regex
     Regexp Regex
   | -- | The bytestring must match the CDDL rule
