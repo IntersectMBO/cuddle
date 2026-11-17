@@ -1,7 +1,9 @@
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE MultiWayIf #-}
+{-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TypeData #-}
 {-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE UndecidableInstances #-}
 
 module Codec.CBOR.Cuddle.CDDL.Custom.Generator (
   GenPhase,
@@ -33,6 +35,7 @@ module Codec.CBOR.Cuddle.CDDL.Custom.Generator (
 
   -- * Contstraints
   GenConstraint (..),
+  showConstraint,
 
   -- * Interval
   Interval (..),
@@ -53,13 +56,13 @@ import Codec.CBOR.Cuddle.CDDL (GRef (..), Name (..))
 import Codec.CBOR.Cuddle.CDDL.CTree (CTree, CTreeRoot (..), XXCTree)
 import Codec.CBOR.Cuddle.CDDL.Custom.Core (MonadCddl (..), RuleTerm)
 import Codec.CBOR.Cuddle.CDDL.Custom.Validator (TermValidator)
-import Codec.CBOR.Term (Term)
 import Control.Monad.Reader (MonadReader (..), MonadTrans (..), ReaderT (..), asks, mapReaderT)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (fromMaybe)
 import Data.Set (Set)
 import Data.Text (Text)
+import Data.Text qualified as T
 import GHC.Generics (Generic)
 import GHC.Stack (HasCallStack)
 import Optics.Lens (Lens')
@@ -315,7 +318,7 @@ data GenConstraint
     Cbor (CTree GenPhase)
   | Cborseq (CTree GenPhase)
   | -- | Catch-all for nonstandard control operators
-    CustomControl Text Term
+    CustomControl Text (CTree GenPhase)
   | And (CTree GenPhase)
   | Within (CTree GenPhase)
   deriving (Generic)
@@ -338,7 +341,7 @@ simpleGen gen =
 constrain :: GenConstraint -> TermGenerator a -> TermGenerator a
 constrain c (TermGenerator _ f) = case f c of
   Just g -> g
-  Nothing -> error "Failed to apply constraint"
+  Nothing -> error $ "Failed to apply constraint:\n" <> T.unpack (showConstraint c)
 
 -- | A 'TermGenerator' that can only be built while generating, for example
 -- because building it needs to look up a rule. Constraints applied to it are
@@ -353,3 +356,18 @@ deferGen mkGen = go []
             tgGenerator $ foldr constrain g cs
         , tgConstrain = \c -> Just . go $ c : cs
         }
+
+showConstraint :: GenConstraint -> Text
+showConstraint = \case
+  Size _ -> ".size"
+  Range _ -> ".range"
+  Eq _ -> ".eq"
+  Neq _ -> ".neq"
+  Default _ -> ".default"
+  Bits _ -> ".bits"
+  Regexp _ -> ".regexp"
+  Cbor _ -> ".cbor"
+  Cborseq _ -> ".cborseq"
+  CustomControl c _ -> "." <> c
+  And _ -> ".and"
+  Within _ -> ".within"

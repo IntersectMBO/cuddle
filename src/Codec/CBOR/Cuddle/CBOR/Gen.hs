@@ -334,8 +334,29 @@ genPostlude pt = go $ genPTerm pt
         p@PTInt -> nonPInteger p
         p -> pure p |! genExcluding [PTAny, p]
 
-genInteger :: (Integer, Integer) -> (Integer, Integer) -> TermGenerator Term
-genInteger validRng invalidRng = simpleGen $ TInteger <$> antiChoose validRng invalidRng
+genInteger :: Interval Integer -> (Integer, Integer) -> TermGenerator Term
+genInteger validRng invalidRng = go validRng mempty
+  where
+    go validInterval excluded =
+      TermGenerator
+        { tgGenerator = do
+            x <- rangeInInterval invalidRng validInterval `suchThat` (`Set.notMember` excluded)
+            pure $ TInteger x
+        , tgConstrain = \case
+            Interval.Size szRule -> Just $ deferGen $ do
+              sz <- evalInteger szRule
+              pure $ go (validInterval <> lessThanOrEqual (2 ^ sz)) excluded
+            Interval.Range intRule -> Just $ deferGen $ do
+              int <- traverse evalInteger intRule
+              pure $ go (validInterval <> int) excluded
+            Interval.Eq r -> Just $ deferGen $ do
+              x <- evalInteger r
+              pure $ go (validInterval <> Interval.singleton x) excluded
+            Interval.Neq r -> Just $ deferGen $ do
+              x <- evalInteger r
+              pure $ go validInterval $ Set.insert x excluded
+            _ -> Nothing
+        }
 
 genFloat :: TermGenerator Float
 genFloat = simpleGen arbitrary
@@ -349,9 +370,9 @@ genPTerm = \case
   PTBool -> simpleGen $ TBool <$> arbitrary
   -- For integers, introduce decision points that sometimes generate
   -- out-of-bounds values
-  PTUInt -> genInteger (0, uintMax) outOfBounds
-  PTNInt -> genInteger (nintMin, -1) outOfBounds
-  PTInt -> genInteger (nintMin, uintMax) (nintMin, uintMax)
+  PTUInt -> genInteger (Interval (ClosedBound 0) (ClosedBound uintMax)) outOfBounds
+  PTNInt -> genInteger (Interval (ClosedBound nintMin) $ ClosedBound $ -1) outOfBounds
+  PTInt -> genInteger (Interval (ClosedBound nintMin) (ClosedBound uintMax)) outOfBounds
   PTHalf -> THalf <$> genHalf
   PTFloat -> TFloat <$> genFloat
   PTDouble -> TDouble <$> genDouble
