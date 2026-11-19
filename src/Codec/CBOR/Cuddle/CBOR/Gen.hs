@@ -30,7 +30,11 @@ module Codec.CBOR.Cuddle.CBOR.Gen (
 
 #if MIN_VERSION_random(1,3,0)
 #endif
-import Codec.CBOR.Cuddle.CBOR.Canonical (nintMin, toCanonical, uintMax)
+import Codec.CBOR.Cuddle.CBOR.Canonical (
+  nintMin,
+  toCanonical,
+  uintMax,
+ )
 import Codec.CBOR.Cuddle.CBOR.Validator (validateAgainst)
 import Codec.CBOR.Cuddle.CDDL (
   GRef (..),
@@ -55,16 +59,12 @@ import Codec.CBOR.Cuddle.CDDL.Custom.Generator (
   GenEnv (..),
   GenPhase,
   TermGenerator (..),
-  TwiddleConfig (..),
-  TwiddlePolicy (..),
+  bindGen,
   constrain,
   deferGen,
   genFromInterval,
-  isDefiniteAllowed,
-  isIndefiniteAllowed,
   rangeInInterval,
   simpleGen,
-  withTwiddle,
  )
 import Codec.CBOR.Cuddle.CDDL.Custom.Generator qualified as Gen
 import Codec.CBOR.Cuddle.CDDL.Custom.Validator (
@@ -206,27 +206,24 @@ genHalf = go universe mempty
         }
 
 genTwiddled ::
-  (TwiddleConfig -> TwiddlePolicy) ->
   (a -> Term) ->
   (a -> Term) ->
   a ->
   CBORGen Term
-genTwiddled getPolicy definite indefinite term = do
-  policy <- asks $ getPolicy . gcTwiddle . geConfig
-  elements $
-    [definite term | isDefiniteAllowed policy] <> [indefinite term | isIndefiniteAllowed policy]
+genTwiddled definite indefinite term = do
+  elements [definite term, indefinite term]
 
 twiddleArray :: [Term] -> CBORGen Term
-twiddleArray = genTwiddled tcArrays TList TListI
+twiddleArray = genTwiddled TList TListI
 
 twiddleMap :: [(Term, Term)] -> CBORGen Term
-twiddleMap = genTwiddled tcMaps TMap TMapI
+twiddleMap = genTwiddled TMap TMapI
 
 twiddleText :: Text -> CBORGen Term
-twiddleText = genTwiddled tcText TString (TStringI . TL.fromStrict)
+twiddleText = genTwiddled TString (TStringI . TL.fromStrict)
 
 twiddleBytes :: ByteString -> CBORGen Term
-twiddleBytes = genTwiddled tcBytes TBytes (TBytesI . LBS.fromStrict)
+twiddleBytes = genTwiddled TBytes (TBytesI . LBS.fromStrict)
 
 genTerm :: CBORGen Term
 genTerm =
@@ -265,13 +262,13 @@ capAtSize sz int
   where
     capped = int `intersect` lessThanOrEqual sz
 
-genBytesTerm :: TermGenerator Term
-genBytesTerm = go Nothing $ greaterThanOrEqual 0
+genBytes :: TermGenerator ByteString
+genBytes = go Nothing $ greaterThanOrEqual 0
   where
     go mCbor szRange =
       TermGenerator
         { tgGenerator =
-            twiddleBytes =<< case mCbor of
+            case mCbor of
               Nothing -> sized $ \sz -> do
                 numElems <- genFromInterval $ capAtSize sz szRange
                 genNBytes numElems
@@ -309,14 +306,14 @@ genNBytesText n = do
   builder <- go n mempty
   pure . LT.toStrict $ toLazyText builder
 
-genTextTerm :: TermGenerator Term
+genTextTerm :: TermGenerator Text
 genTextTerm = go $ greaterThanOrEqual 0
   where
     go sizeRange =
       TermGenerator
         { tgGenerator = sized $ \sz -> do
             n <- genFromInterval $ capAtSize sz sizeRange
-            twiddleText =<< genNBytesText n
+            genNBytesText n
         , tgConstrain = \case
             Gen.Size rngRule -> Just $ deferGen $ do
               newRange <- evalInterval evalInteger rngRule
@@ -350,14 +347,13 @@ genPostlude pt = go $ genPTerm pt
         p@PTInt -> nonPInteger p
         p -> pure p |! genExcluding [PTAny, p]
 
-genInteger :: Interval Integer -> (Integer, Integer) -> TermGenerator Term
+genInteger :: Interval Integer -> (Integer, Integer) -> TermGenerator Integer
 genInteger validRng invalidRng = go validRng mempty
   where
     go validInterval excluded =
       TermGenerator
-        { tgGenerator = do
-            x <- rangeInInterval invalidRng validInterval `suchThat` (`Set.notMember` excluded)
-            pure $ TInteger x
+        { tgGenerator =
+            rangeInInterval invalidRng validInterval `suchThat` (`Set.notMember` excluded)
         , tgConstrain = \case
             Gen.Size szRule -> Just $ deferGen $ do
               sz <- evalInteger szRule
@@ -386,14 +382,14 @@ genPTerm = \case
   PTBool -> simpleGen $ TBool <$> arbitrary
   -- For integers, introduce decision points that sometimes generate
   -- out-of-bounds values
-  PTUInt -> genInteger (0 ..= uintMax) outOfBounds
-  PTNInt -> genInteger (nintMin ..= (-1)) outOfBounds
-  PTInt -> genInteger (nintMin ..= uintMax) outOfBounds
+  PTUInt -> TInteger <$> genInteger (0 ..= uintMax) outOfBounds
+  PTNInt -> TInteger <$> genInteger (nintMin ..= (-1)) outOfBounds
+  PTInt -> TInteger <$> genInteger (nintMin ..= uintMax) outOfBounds
   PTHalf -> THalf <$> genHalf
   PTFloat -> TFloat <$> genFloat
   PTDouble -> TDouble <$> genDouble
-  PTBytes -> genBytesTerm
-  PTText -> genTextTerm
+  PTBytes -> bindGen twiddleBytes genBytes
+  PTText -> bindGen twiddleText genTextTerm
   PTAny -> simpleGen genTerm
   PTNil -> simpleGen $ pure TNull
   PTUndefined -> simpleGen $ pure $ TSimple 23
@@ -740,15 +736,18 @@ genTag t node = simpleGen $ do
     then tgGenerator $ genForCTree node
     else do
       tag <- faultyNum t
-      enc <- case tag of
+      innerTerm <- case tag of
+        -- TODO remove this case once we switch away from cborg's Term
         n
-          | n == 2 || n == 3 ->
-              -- TODO remove this once `cborg` can decode indefinite bytes in bignums
-              withTwiddle (\c -> c {tcBytes = DefiniteOnly}) . tgGenerator $ genForCTree node
+          | n == 2 || n == 3 -> do
+              res <- tgGenerator $ genForCTree node
+              pure $ case res of
+                SingleTerm (TBytesI bs) -> SingleTerm $ TBytes $ LBS.toStrict bs
+                _ -> res
         _ -> tgGenerator $ genForCTree node
-      case enc of
-        SingleTerm x -> pure $ SingleTerm $ TTagged tag x
-        _ -> error "Tag controller does not correspond to a single term"
+      case innerTerm of
+        SingleTerm term -> pure . SingleTerm $ TTagged tag term
+        _ -> error "Expected a single term"
 
 genForNode :: HasCallStack => Name -> TermGenerator RuleTerm
 genForNode name = deferGen $ genForCTree <$> resolveRef name

@@ -21,19 +21,9 @@ module Codec.CBOR.Cuddle.CDDL.Custom.Generator (
   simpleGen,
   constrain,
   deferGen,
+  bindGen,
   genFromInterval,
   rangeInInterval,
-
-  -- * Twiddling
-  TwiddleConfig (..),
-  TwiddlePolicy (..),
-  isIndefiniteAllowed,
-  isDefiniteAllowed,
-  twiddleUniform,
-  twiddleAll,
-  twiddleNothing,
-  withTwiddle,
-  disableTwiddle,
 
   -- * Contstraints
   GenConstraint (..),
@@ -62,47 +52,9 @@ import Text.Regex.TDFA (Regex)
 
 type data GenPhase
 
-data TwiddlePolicy
-  = DefiniteOnly
-  | IndefiniteOnly
-  | DefiniteAndIndefinite
-  deriving (Generic, Show, Eq, Ord, Enum)
-
-isDefiniteAllowed :: TwiddlePolicy -> Bool
-isDefiniteAllowed IndefiniteOnly = False
-isDefiniteAllowed _ = True
-
-isIndefiniteAllowed :: TwiddlePolicy -> Bool
-isIndefiniteAllowed DefiniteOnly = False
-isIndefiniteAllowed _ = True
-
-data TwiddleConfig = TwiddleConfig
-  { tcBytes :: !TwiddlePolicy
-  , tcArrays :: !TwiddlePolicy
-  , tcText :: !TwiddlePolicy
-  , tcMaps :: !TwiddlePolicy
-  }
-  deriving (Generic, Show, Eq, Ord)
-
-twiddleUniform :: TwiddlePolicy -> TwiddleConfig
-twiddleUniform policy =
-  TwiddleConfig
-    { tcBytes = policy
-    , tcArrays = policy
-    , tcText = policy
-    , tcMaps = policy
-    }
-
-twiddleAll :: TwiddleConfig
-twiddleAll = twiddleUniform DefiniteAndIndefinite
-
-twiddleNothing :: TwiddleConfig
-twiddleNothing = twiddleUniform DefiniteOnly
-
 -- | User-supplied configuration for the generator monad.
-data GenConfig = GenConfig
+newtype GenConfig = GenConfig
   { gcRoot :: CTreeRoot GenPhase
-  , gcTwiddle :: !TwiddleConfig
   }
   deriving (Generic)
 
@@ -146,21 +98,6 @@ instance MonadCddl CBORGen where
 
 withAntiGen :: (AntiGen a -> AntiGen b) -> CBORGen a -> CBORGen b
 withAntiGen f (CBORGen m) = CBORGen $ mapReaderT f m
-
-withTwiddle :: (TwiddleConfig -> TwiddleConfig) -> CBORGen a -> CBORGen a
-withTwiddle f =
-  local
-    ( \env ->
-        env
-          { geConfig =
-              (geConfig env)
-                { gcTwiddle = f (gcTwiddle $ geConfig env)
-                }
-          }
-    )
-
-disableTwiddle :: CBORGen a -> CBORGen a
-disableTwiddle = withTwiddle $ const twiddleNothing
 
 -- | Run an action with the given local generic bindings installed.
 -- Used to wrap custom generators attached to generic rules so that
@@ -264,6 +201,15 @@ deferGen mkGen = go []
             tgGenerator $ foldr constrain g cs
         , tgConstrain = \c -> Just . go $ c : cs
         }
+
+-- | Runs a generator action on each value the generator produces.
+-- Constraints still apply to the original generator.
+bindGen :: (a -> CBORGen b) -> TermGenerator a -> TermGenerator b
+bindGen f tg =
+  TermGenerator
+    { tgGenerator = f =<< tgGenerator tg
+    , tgConstrain = fmap (bindGen f) . tgConstrain tg
+    }
 
 showConstraint :: GenConstraint -> Text
 showConstraint = \case

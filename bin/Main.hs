@@ -19,8 +19,6 @@ import Codec.CBOR.Cuddle.CDDL.CTree (CTreeRoot)
 import Codec.CBOR.Cuddle.CDDL.Custom.Generator (
   GenConfig (..),
   runCBORGen,
-  twiddleAll,
-  twiddleNothing,
  )
 import Codec.CBOR.Cuddle.CDDL.Postlude (appendPostlude)
 import Codec.CBOR.Cuddle.CDDL.Resolve (
@@ -404,10 +402,7 @@ run = \case
             | goNegative = 1
             | otherwise = 0
           cfg =
-            GenConfig
-              { gcRoot = mapIndex mt
-              , gcTwiddle = if goTwiddle then twiddleAll else twiddleNothing
-              }
+            GenConfig $ mapIndex mt
           term = runGen seed goSize . zapAntiGen zapN . runCBORGen cfg $ generateFromName (Name itemName)
           formatted = formatTerm term outputFormat
         case outputTo of

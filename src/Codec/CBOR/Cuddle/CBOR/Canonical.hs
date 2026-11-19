@@ -8,6 +8,8 @@ module Codec.CBOR.Cuddle.CBOR.Canonical (
   toCanonical,
   uintMax,
   nintMin,
+  unsignedToBytes,
+  bytesToUnsigned,
 ) where
 
 import Codec.CBOR.Term (Term (..))
