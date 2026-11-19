@@ -26,6 +26,14 @@ module Codec.CBOR.Cuddle.CBOR.Gen (
   evalDouble,
   evalInteger,
   evalArray,
+
+  -- * Generator helpers
+  genNBytes,
+  genNBytesText,
+  genBytes,
+  genText,
+  genInteger,
+  genTerm,
 ) where
 
 #if MIN_VERSION_random(1,3,0)
@@ -306,8 +314,8 @@ genNBytesText n = do
   builder <- go n mempty
   pure . LT.toStrict $ toLazyText builder
 
-genTextTerm :: TermGenerator Text
-genTextTerm = go $ greaterThanOrEqual 0
+genText :: TermGenerator Text
+genText = go $ greaterThanOrEqual 0
   where
     go sizeRange =
       TermGenerator
@@ -389,7 +397,7 @@ genPTerm = \case
   PTFloat -> TFloat <$> genFloat
   PTDouble -> TDouble <$> genDouble
   PTBytes -> bindGen twiddleBytes genBytes
-  PTText -> bindGen twiddleText genTextTerm
+  PTText -> bindGen twiddleText genText
   PTAny -> simpleGen genTerm
   PTNil -> simpleGen $ pure TNull
   PTUndefined -> simpleGen $ pure $ TSimple 23
