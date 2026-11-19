@@ -692,6 +692,9 @@ evalInterval f = \case
     pure $ Interval (ClosedBound lo) $ case bound of
       ClOpen -> OpenBound hi
       Closed -> ClosedBound hi
+  CTreeE (GenGenerator _ t) -> evalInterval f t
+  CTreeE (GenValidator _ t) -> evalInterval f t
+  CTreeE (GenRef n) -> evalInterval f =<< resolveRef n
   x -> Interval.singleton <$> f x
 
 -- | Generate a value with a control operator applied
