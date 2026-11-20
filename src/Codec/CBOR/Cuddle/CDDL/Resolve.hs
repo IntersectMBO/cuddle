@@ -63,14 +63,14 @@ import Control.Monad.State.Strict (StateT (..))
 import Data.Generics.Product
 import Data.Generics.Sum
 import Data.Hashable
-#if __GLASGOW_HASKELL__ < 910
+
 import Data.List (foldl')
-#endif
+
 import Codec.CBOR.Cuddle.CDDL.CTreePhase (CTreePhase, XRule (..))
 import Codec.CBOR.Cuddle.CDDL.Custom.Core (RuleTerm)
 import Codec.CBOR.Cuddle.CDDL.Custom.Generator (
-  CBORGen,
   GenPhase,
+  TermGenerator (..),
   XXCTree (..),
   withLocalGenBindings,
  )
@@ -106,7 +106,7 @@ newtype PartialCTreeRoot i = PartialCTreeRoot (Map.Map Name (ProvidedParameters 
 
 data CDDLMapEntry = CDDLMapEntry
   { cmeProvidedParameters :: ProvidedParameters (TypeOrGroup CTreePhase)
-  , cmeCustomGenerator :: Maybe (CBORGen RuleTerm)
+  , cmeCustomGenerator :: TermGenerator RuleTerm -> TermGenerator RuleTerm
   , cmeCustomValidator :: Maybe TermValidator
   }
   deriving (Generic)
@@ -157,7 +157,7 @@ asMap cddl = foldl' go Map.empty rules
       (TOGType _, _) -> error "Attempting to extend a type with a group"
       (TOGGroup _, _) -> error "Attempting to extend a group with a type"
     extend tog gps Nothing =
-      Just $ CDDLMapEntry (toParametrised tog gps) Nothing Nothing
+      Just $ CDDLMapEntry (toParametrised tog gps) id Nothing
 
 --------------------------------------------------------------------------------
 -- 2. Conversion to CTree
@@ -168,7 +168,7 @@ type data OrReferenced
 data instance XXCTree OrReferenced
   = -- | Reference to another node with possible generic arguments supplied
     OrRef Name [CTree OrReferenced]
-  | OGenerator (CBORGen RuleTerm) (CTree OrReferenced)
+  | OGenerator (TermGenerator RuleTerm -> TermGenerator RuleTerm) (CTree OrReferenced)
   | OValidator TermValidator (CTree OrReferenced)
 
 type data OrReferencedSimple
@@ -213,9 +213,7 @@ buildRefCTree rules = PartialCTreeRoot $ toCTreeRule <$> rules
     toCTreeRule CDDLMapEntry {..} =
       applyValidator . applyGenerator . toCTreeTOG <$> cmeProvidedParameters
       where
-        applyGenerator = case cmeCustomGenerator of
-          Just g -> CTreeE . OGenerator g
-          Nothing -> id
+        applyGenerator = CTreeE . OGenerator cmeCustomGenerator
         applyValidator = case cmeCustomValidator of
           Just v -> CTreeE . OValidator v
           Nothing -> id
@@ -416,7 +414,7 @@ instance Pretty (XXCTree i) => Pretty (DistRef i) where
 
 data instance XXCTree DistReferenced
   = DRef (DistRef DistReferenced)
-  | DGenerator (CBORGen RuleTerm) (CTree DistReferenced)
+  | DGenerator (TermGenerator RuleTerm -> TermGenerator RuleTerm) (CTree DistReferenced)
   | DValidator TermValidator (CTree DistReferenced)
 
 type data DistReferencedNoGen
@@ -472,7 +470,7 @@ type data MonoReferenced
 
 data instance XXCTree MonoReferenced
   = MRuleRef Name
-  | MGenerator (CBORGen RuleTerm) (CTree MonoReferenced)
+  | MGenerator (TermGenerator RuleTerm -> TermGenerator RuleTerm) (CTree MonoReferenced)
   | MValidator TermValidator (CTree MonoReferenced)
 
 type MonoEnv = BindingEnv DistReferenced MonoReferenced
@@ -633,11 +631,13 @@ resolveGenericRef (DRef (GenericRef n)) = do
   case Map.lookup n localBinds of
     Just node -> pure node
     Nothing -> throwNR $ UnboundReference n
-resolveGenericRef (DGenerator g x) = do
+resolveGenericRef (DGenerator fGen x) = do
   binds <- ask @"local"
   body <- resolveGenericCTree x
   let bindsGen = mapIndex @CTree @MonoReferenced @GenPhase <$> binds
-      g' = withLocalGenBindings bindsGen g
+      g' tg =
+        let TermGenerator newGen m = fGen tg
+         in TermGenerator (withLocalGenBindings bindsGen newGen) m
   pure . CTreeE $ MGenerator g' body
 resolveGenericRef (DValidator v x) = do
   binds <- ask @"local"
