@@ -527,6 +527,9 @@ instance IsConstrainable (Value a) a where
 instance IsConstrainable GRef CGRefType where
   toConstrainable = CGRef
 
+instance IsConstrainable Rule CRefType where
+  toConstrainable (Rule {..}) = CRef $ AnyRef ruleName ruleDefinition
+
 unconstrained :: Value a -> Constrained
 unconstrained v = Constrained (CValue v) def []
 
@@ -612,6 +615,7 @@ class IsCborable a
 instance IsCborable ByteString
 instance IsCborable AnyRef
 instance IsCborable GRef
+instance IsCborable CRefType
 
 cbor :: (IsCborable b, IsConstrainable c b) => c -> Rule -> Constrained
 cbor v r@(Rule n _ _) =
