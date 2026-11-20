@@ -94,7 +94,9 @@ module Codec.CBOR.Cuddle.Huddle (
 
   -- * Generators
   withCBORGen,
+  withOverrideCBORGen,
   withGenerator,
+  withOverrideGenerator,
 
   -- * Validators
   withValidator,
@@ -124,7 +126,7 @@ import Codec.CBOR.Cuddle.CDDL.Custom.Core (RuleTerm)
 import Codec.CBOR.Cuddle.CDDL.Custom.Generator (
   CBORGen,
   HasGenerator (..),
-  TermGenerator,
+  TermGenerator (..),
   simpleGen,
  )
 import Codec.CBOR.Cuddle.CDDL.Custom.Validator (HasValidator (..), TermValidator)
@@ -163,7 +165,7 @@ newtype instance C.XCddl HuddleStage = HuddleXCddl [C.Comment]
 
 data instance C.XRule HuddleStage = HuddleXRule
   { hxrComment :: C.Comment
-  , hxrGenerator :: Maybe (TermGenerator RuleTerm)
+  , hxrGenerator :: TermGenerator RuleTerm -> TermGenerator RuleTerm
   , hxrValidator :: Maybe TermValidator
   }
   deriving (Generic)
@@ -177,7 +179,8 @@ instance HasValidator (C.XRule HuddleStage) where
 instance HasGenerator (C.XRule HuddleStage) where
   generatorL = #hxrGenerator
 
-instance Default (XRule HuddleStage)
+instance Default (XRule HuddleStage) where
+  def = HuddleXRule def id def
 
 newtype instance C.XXTopLevel HuddleStage = HuddleXXTopLevel C.Comment
   deriving (Generic, Semigroup, Monoid, Show, Eq)
@@ -1154,7 +1157,7 @@ collectFrom topRs =
     goRanged (Unranged _) = pure ()
     goRanged (Ranged lb ub _) = goRangeBound lb >> goRangeBound ub
     goRangeBound (RangeBoundLiteral _) = pure ()
-    goRangeBound (RangeBoundRef n r) = goRule . Rule n r $ HuddleXRule mempty Nothing Nothing
+    goRangeBound (RangeBoundRef n r) = goRule . Rule n r $ HuddleXRule mempty id Nothing
 
 -- | Same as `collectFrom`, but the rules passed into this function will be put
 --   at the top of the Huddle, and all of their dependencies will be added at
@@ -1374,11 +1377,18 @@ toCDDL' HuddleConfig {..} hdl =
             fmap (\(GRef t) -> GenericParameter (C.Name t) $ HuddleXTerm mempty) (args gr)
 
 withGenerator :: HasGenerator a => TermGenerator RuleTerm -> a -> a
-withGenerator gen = L.set generatorL $ Just gen
+withGenerator g = withOverrideGenerator $ const g
+
+withOverrideGenerator ::
+  HasGenerator a => (TermGenerator RuleTerm -> TermGenerator RuleTerm) -> a -> a
+withOverrideGenerator = L.set generatorL
 
 -- | Use a custom `CBORGen` generator to generate the term.
 withCBORGen :: HasGenerator a => CBORGen RuleTerm -> a -> a
-withCBORGen = withGenerator . simpleGen
+withCBORGen g = withOverrideCBORGen $ const g
+
+withOverrideCBORGen :: HasGenerator a => (CBORGen RuleTerm -> CBORGen RuleTerm) -> a -> a
+withOverrideCBORGen f = withOverrideGenerator $ simpleGen . f . tgGenerator
 
 withValidator :: HasValidator a => TermValidator -> a -> a
 withValidator p = L.set validatorL $ Just p

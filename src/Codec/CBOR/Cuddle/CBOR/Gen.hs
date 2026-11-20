@@ -469,7 +469,7 @@ genForCTree node = case node of
   CTree.Unwrap n -> genForCTree n
   CTree.Tag t n -> genTag t n
   CTree.CTreeE (GenRef n) -> genForNode n
-  CTree.CTreeE (GenGenerator gen _) -> gen
+  CTree.CTreeE (GenGenerator gen n) -> gen $ genForCTree n
   CTree.CTreeE (GenValidator _ x) -> genForCTree x
 
 isInvalidAgainstNode :: CTreeRoot GenPhase -> Term -> CTree GenPhase -> Bool

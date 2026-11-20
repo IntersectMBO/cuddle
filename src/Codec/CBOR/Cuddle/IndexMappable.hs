@@ -230,7 +230,7 @@ instance IndexMappable XTerm ParserStage CTreePhase where
   mapIndex _ = CTreeXTerm
 
 instance IndexMappable XRule ParserStage CTreePhase where
-  mapIndex _ = CTreeXRule Nothing Nothing
+  mapIndex _ = CTreeXRule id Nothing
 
 -- ParserStage -> HuddleStage
 

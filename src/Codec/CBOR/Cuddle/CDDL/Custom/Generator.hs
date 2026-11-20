@@ -1,5 +1,4 @@
 {-# LANGUAGE LambdaCase #-}
-{-# LANGUAGE MultiWayIf #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TypeData #-}
 {-# LANGUAGE TypeFamilies #-}
@@ -109,11 +108,11 @@ withLocalGenBindings binds =
 
 data instance XXCTree GenPhase
   = GenRef Name
-  | GenGenerator (TermGenerator RuleTerm) (CTree GenPhase)
+  | GenGenerator (TermGenerator RuleTerm -> TermGenerator RuleTerm) (CTree GenPhase)
   | GenValidator TermValidator (CTree GenPhase)
 
 class HasGenerator a where
-  generatorL :: Lens' a (Maybe (TermGenerator RuleTerm))
+  generatorL :: Lens' a (TermGenerator RuleTerm -> TermGenerator RuleTerm)
 
 genFromInterval ::
   ( HasCallStack

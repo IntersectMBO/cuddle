@@ -32,7 +32,7 @@ data instance XCddl CTreePhase = CTreeXCddl
   deriving (Generic, Show, Eq, Ord)
 
 data instance XRule CTreePhase
-  = CTreeXRule (Maybe (TermGenerator RuleTerm)) (Maybe TermValidator)
+  = CTreeXRule (TermGenerator RuleTerm -> TermGenerator RuleTerm) (Maybe TermValidator)
   deriving (Generic)
 
 data instance XXType2 CTreePhase
