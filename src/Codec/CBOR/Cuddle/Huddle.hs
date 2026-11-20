@@ -481,18 +481,9 @@ inferInteger i
 -- Constraints and Ranges
 --------------------------------------------------------------------------------
 
--- | A reference can be to any type, so we allow it to inhabit all
-data AnyRef = AnyRef
-  { arName :: Name
-  , arDefinition :: Type0
-  }
-
-instance HasName AnyRef where
-  getName = arName
-
 data Constrainable a
   = CValue (Value a)
-  | CRef AnyRef
+  | CRef Rule
   | CGRef GRef
 
 -- | Uninhabited type used as marker for the type of thing a CRef sizes
@@ -518,7 +509,7 @@ data Constrained where
 class IsConstrainable a x | a -> x where
   toConstrainable :: a -> Constrainable x
 
-instance IsConstrainable AnyRef CRefType where
+instance IsConstrainable Rule CRefType where
   toConstrainable = CRef
 
 instance IsConstrainable (Value a) a where
@@ -526,9 +517,6 @@ instance IsConstrainable (Value a) a where
 
 instance IsConstrainable GRef CGRefType where
   toConstrainable = CGRef
-
-instance IsConstrainable Rule CRefType where
-  toConstrainable (Rule {..}) = CRef $ AnyRef ruleName ruleDefinition
 
 unconstrained :: Value a -> Constrained
 unconstrained v = Constrained (CValue v) def []
@@ -613,7 +601,6 @@ sized v sz =
 
 class IsCborable a
 instance IsCborable ByteString
-instance IsCborable AnyRef
 instance IsCborable GRef
 instance IsCborable CRefType
 
@@ -633,7 +620,6 @@ cbor v r@(Rule n _ _) =
 
 class IsComparable a
 instance IsComparable Int
-instance IsComparable AnyRef
 instance IsComparable GRef
 
 le :: (IsComparable a, IsConstrainable c a) => c -> Word64 -> Constrained
@@ -1154,7 +1140,7 @@ collectFrom topRs =
     goT2 (T2Constrained (Constrained c _ refs)) =
       ( case c of
           CValue _ -> pure ()
-          CRef AnyRef {..} -> goRule $ Rule arName arDefinition def
+          CRef rule -> goRule rule
           CGRef _ -> pure ()
       )
         >> mapM_ goRule refs
