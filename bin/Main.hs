@@ -6,7 +6,7 @@
 
 module Main (main) where
 
-import Codec.CBOR.Cuddle.CBOR.Gen (generateFromName)
+import Codec.CBOR.Cuddle.CBOR.Generator (generateFromName)
 import Codec.CBOR.Cuddle.CBOR.Validator
 import Codec.CBOR.Cuddle.CBOR.Validator.Trace (
   Evidenced (..),

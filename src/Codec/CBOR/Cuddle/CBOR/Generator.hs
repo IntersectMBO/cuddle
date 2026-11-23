@@ -14,7 +14,7 @@
 {-# OPTIONS_GHC -Wno-orphans #-}
 
 -- | Generate example CBOR given a CDDL specification
-module Codec.CBOR.Cuddle.CBOR.Gen (
+module Codec.CBOR.Cuddle.CBOR.Generator (
   generateFromName,
   generateFromGRef,
   GenPhase,

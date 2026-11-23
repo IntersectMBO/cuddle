@@ -12,7 +12,7 @@ module Test.Codec.CBOR.Cuddle.CDDL.Validator (
 ) where
 
 import Codec.CBOR.Cuddle.CBOR.Canonical (toCanonical)
-import Codec.CBOR.Cuddle.CBOR.Gen (generateFromName)
+import Codec.CBOR.Cuddle.CBOR.Generator (generateFromName)
 import Codec.CBOR.Cuddle.CBOR.Validator (
   ValidatorPhase,
   validateCBOR,

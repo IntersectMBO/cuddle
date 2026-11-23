@@ -4,7 +4,7 @@
 
 module Test.Codec.CBOR.Cuddle.CDDL.GeneratorSpec (spec) where
 
-import Codec.CBOR.Cuddle.CBOR.Gen (GenPhase, generateFromName)
+import Codec.CBOR.Cuddle.CBOR.Generator (GenPhase, generateFromName)
 import Codec.CBOR.Cuddle.CDDL (Name)
 import Codec.CBOR.Cuddle.CDDL.CTree (CTreeRoot (..))
 import Codec.CBOR.Cuddle.CDDL.Custom.Generator (GenConfig (..), runCBORGen)

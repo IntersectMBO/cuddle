@@ -31,7 +31,7 @@ module Test.Codec.CBOR.Cuddle.CDDL.Examples.Huddle (
   tagRangeExample,
 ) where
 
-import Codec.CBOR.Cuddle.CBOR.Gen (generateFromGRef)
+import Codec.CBOR.Cuddle.CBOR.Generator (generateFromGRef)
 import Codec.CBOR.Cuddle.CBOR.Validator (validateFromGRef)
 import Codec.CBOR.Cuddle.CDDL (Name)
 import Codec.CBOR.Cuddle.CDDL.Custom.Core (RuleTerm (..))
