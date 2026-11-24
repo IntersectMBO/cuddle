@@ -34,6 +34,7 @@ module Codec.CBOR.Cuddle.CDDL.Custom.Validator (
   ListValidationTrace (..),
   MapValidationTrace (..),
   evidence,
+  fromEither,
   foldEvidenced,
   measureProgress,
   prettyValidationTrace,
@@ -41,12 +42,17 @@ module Codec.CBOR.Cuddle.CDDL.Custom.Validator (
 
 import Codec.CBOR.Cuddle.CBOR.Canonical (CanonicalTerm)
 import Codec.CBOR.Cuddle.CDDL (GRef (..), Name (..))
-import Codec.CBOR.Cuddle.CDDL.CTree (CTree (..), CTreeRoot (..), XXCTree)
+import Codec.CBOR.Cuddle.CDDL.CTree (CTree (..), CTreeRoot (..), XXCTree (..), foldCTree)
 import Codec.CBOR.Cuddle.CDDL.CtlOp (CtlOp)
 import Codec.CBOR.Cuddle.CDDL.Custom.Core (MonadCddl (..), RuleTerm)
 import Codec.CBOR.Cuddle.CDDL.Phase (MonoSimplePhase)
+import Codec.CBOR.Cuddle.IndexMappable (IndexMappable (..))
 import Codec.CBOR.Term (Term)
+import Control.Applicative (Alternative (..))
+import Control.Monad.Except (ExceptT, MonadError (..), runExceptT, tryError)
 import Control.Monad.Reader (MonadReader (..), ReaderT (..), asks)
+import Control.Monad.State.Strict (MonadState (..), State, modify, runState)
+import Data.Foldable (Foldable (..))
 import Data.Function (on)
 import Data.Kind (Type)
 import Data.List.NonEmpty (NonEmpty)
@@ -86,10 +92,12 @@ data ValidateEnv = ValidateEnv
   , veLocal :: Map Name (CTree ValidatorPhase)
   }
 
-newtype Validator a = Validator (ReaderT ValidateEnv (Either (ValidationTrace IsInvalid)) a)
+newtype Validator a
+  = Validator
+      (ReaderT ValidateEnv (ExceptT (ValidationTrace IsInvalid) (State [ValidationTrace IsValid])) a)
   deriving (Functor, Applicative, Monad, MonadReader ValidateEnv)
 
-type TermValidator = RuleTerm -> Validator (ValidationTrace IsValid)
+type TermValidator = RuleTerm -> Validator ()
 
 instance MonadCddl Validator where
   type Phase Validator = ValidatorPhase
@@ -103,7 +111,51 @@ instance MonadCddl Validator where
     pure $ Map.lookup (Name t) binds
 
 instance MonadFail Validator where
-  fail msg = Validator . ReaderT $ \_ -> Left $ CustomFailure $ T.pack msg
+  fail msg = failWith $ CustomFailure $ T.pack msg
+
+instance Alternative Validator where
+  Validator x <|> Validator y = Validator $ do
+    initialSt <- get
+    xRes <- tryError x
+    case xRes of
+      Right res -> pure res
+      Left AlternativeFail -> put initialSt >> y
+      Left xFail -> do
+        xSt <- get
+        put initialSt
+        yRes <- tryError y
+        ySt <- get
+        case yRes of
+          Right res -> pure res
+          Left AlternativeFail -> put xSt >> throwError xFail
+          Left yFail -> do
+            let
+              xTrc = closeSteps xSt $ StepFailed xFail
+              yTrc = closeSteps ySt $ StepFailed yFail
+            case compareInvalidProgress xTrc yTrc of
+              GT -> put xSt >> throwError xFail
+              _ -> put ySt >> throwError yFail
+  empty = failWith AlternativeFail
+
+closeSteps :: [ValidationTrace IsValid] -> StepTrace v -> StepTrace v
+closeSteps steps cap = foldl' (flip Step) cap steps
+
+capture :: Validator a -> Validator (Either (StepTrace IsInvalid) (a, StepTrace IsValid))
+capture (Validator m) = Validator $ do
+  saved <- get
+  put []
+  r <- tryError m
+  steps <- get
+  put saved
+  pure $ case r of
+    Left err -> Left $ closeSteps steps (StepFailed err)
+    Right x -> Right (x, closeSteps steps StepsDone)
+
+accept :: CTree ValidatorPhase -> Validator ()
+accept rule = Validator $ modify (TerminalRule (mapIndex rule) :)
+
+failWith :: ValidationTrace IsInvalid -> Validator a
+failWith err = Validator $ throwError err
 
 -- | Run an action with the given local generic bindings installed.
 withLocalValidateBindings ::
@@ -111,11 +163,13 @@ withLocalValidateBindings ::
 withLocalValidateBindings binds =
   local (\env -> env {veLocal = binds `Map.union` veLocal env})
 
-runValidator ::
-  Validator (ValidationTrace IsValid) -> CTreeRoot ValidatorPhase -> Evidenced ValidationTrace
-runValidator (Validator m) cddl =
-  either evidence evidence $
-    runReaderT m ValidateEnv {veRoot = cddl, veLocal = Map.empty}
+runValidator :: ValidateEnv -> Validator a -> Evidenced StepTrace
+runValidator env (Validator m) = mkStepTrace $ runState (runExceptT $ runReaderT m env) []
+  where
+    mkStepTrace (eFail, st) =
+      case eFail of
+        Right _ -> evidence $ closeSteps st StepsDone
+        Left err -> evidence $ closeSteps st (StepFailed err)
 
 type data Validity
   = IsValid
@@ -151,6 +205,14 @@ foldEvidenced f (Evidenced v t) =
   case v of
     SValid -> f t
     SInvalid -> f t
+
+fromEither ::
+  ( IsValidationTrace t
+  , Show (t IsInvalid)
+  , Show (t IsValid)
+  ) =>
+  Either (t IsInvalid) (t IsValid) -> Evidenced t
+fromEither = either evidence evidence
 
 deriving instance (forall v. Show (t v)) => Show (Evidenced t)
 
@@ -193,13 +255,30 @@ data ControlInfo = ControlInfo
 instance Pretty ControlInfo where
   pretty ControlInfo {..} = pretty ciOp <+> pretty ciRule
 
+data StepTrace v where
+  StepsDone :: StepTrace IsValid
+  Step :: ValidationTrace IsValid -> StepTrace v -> StepTrace v
+  StepFailed :: ValidationTrace IsInvalid -> StepTrace IsInvalid
+
+deriving instance Show (StepTrace v)
+
+instance IsValidationTrace StepTrace where
+  traceValidity = \case
+    StepsDone -> SValid
+    StepFailed _ -> SInvalid
+    Step _ next -> traceValidity next
+  measureProgress = \case
+    StepsDone -> Progress 1 0
+    StepFailed x -> measureProgress x
+    Step this next -> measureProgress this <> measureProgress next
+
 data ValidationTrace (v :: Validity) where
+  AlternativeFail :: ValidationTrace IsInvalid
   UnapplicableRule :: CTree MonoSimplePhase -> ValidationTrace IsInvalid
   TerminalRule :: CTree MonoSimplePhase -> ValidationTrace IsValid
   ControlTrace :: ControlInfo -> ValidationTrace IsValid -> ValidationTrace IsValid
   ReferenceRule :: Name -> ValidationTrace v -> ValidationTrace v
   CustomFailure :: Text -> ValidationTrace IsInvalid
-  CustomSuccess :: ValidationTrace IsValid
   UnsatisfiedControl :: CtlOp -> CTree MonoSimplePhase -> ValidationTrace IsInvalid
   ChoiceBranch :: Int -> ValidationTrace IsValid -> ValidationTrace IsValid
   ListTrace :: ListValidationTrace v -> ValidationTrace v
@@ -267,7 +346,6 @@ deriving instance Show (MapValidationTrace v)
 
 instance IsValidationTrace ValidationTrace where
   traceValidity = \case
-    CustomSuccess {} -> SValid
     TerminalRule {} -> SValid
     ControlTrace {} -> SValid
     ChoiceBranch {} -> SValid
@@ -279,16 +357,17 @@ instance IsValidationTrace ValidationTrace where
     ListTrace x -> traceValidity x
     MapTrace x -> traceValidity x
     TagTrace _ x -> traceValidity x
+    AlternativeFail -> SInvalid
 
   measureProgress = \case
     TerminalRule {} -> Progress 1 0
-    CustomSuccess -> Progress 1 0
     ControlTrace _ x -> measureProgress x
     ChoiceBranch _ x -> measureProgress x
     UnapplicableRule {} -> mempty
     CustomFailure {} -> mempty
     UnsatisfiedControl {} -> mempty
     InvalidTag {} -> mempty
+    AlternativeFail -> mempty
     ReferenceRule _ x -> increaseRefProgress $ measureProgress x
     ListTrace x -> measureProgress x
     MapTrace x -> measureProgress x
@@ -485,7 +564,6 @@ prettyValidationTrace opts = \case
       , nestContainer $ prettyValidationTrace opts x
       ]
   CustomFailure e -> annotate (color Red) $ pretty e
-  CustomSuccess -> "<custom validator>"
   UnsatisfiedControl op ctl ->
     annotate (color Red) $
       vsep
@@ -509,6 +587,7 @@ prettyValidationTrace opts = \case
       ]
   InvalidTag expected actual ->
     "expected tag #6." <> pretty expected <> ", got #6." <> pretty actual
+  AlternativeFail -> mempty
 
 showValidationTrace :: ValidationTrace v -> String
 showValidationTrace =
@@ -516,3 +595,9 @@ showValidationTrace =
     . Ansi.renderStrict
     . layoutPretty defaultLayoutOptions
     . prettyValidationTrace defaultTraceOptions
+
+instance IndexMappable CTree ValidatorPhase MonoSimplePhase where
+  mapIndex = foldCTree mapExt mapIndex
+    where
+      mapExt (VRuleRef n) = CTreeE $ MSimpleRef n
+      mapExt (VValidator _ x) = mapIndex x
