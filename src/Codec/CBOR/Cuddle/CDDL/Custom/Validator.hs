@@ -21,8 +21,8 @@ module Codec.CBOR.Cuddle.CDDL.Custom.Validator (
   nestContainer,
   TraceOptions (..),
   defaultTraceOptions,
-  prettyListValidationResult,
   showValidationTrace,
+  accept,
 
   -- * Trace
   SValidity (..),
@@ -31,8 +31,6 @@ module Codec.CBOR.Cuddle.CDDL.Custom.Validator (
   Evidenced (..),
   ControlInfo (..),
   ValidationTrace (..),
-  ListValidationTrace (..),
-  MapValidationTrace (..),
   evidence,
   fromEither,
   foldEvidenced,
@@ -59,6 +57,7 @@ import Data.List.NonEmpty (NonEmpty)
 import Data.List.NonEmpty qualified as NE
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
+import Data.Maybe (maybeToList)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Type.Equality (TestEquality (..), type (:~:) (..))
@@ -92,10 +91,12 @@ data ValidateEnv = ValidateEnv
   , veLocal :: Map Name (CTree ValidatorPhase)
   }
 
-newtype Validator a
+newtype ValidatorT (b :: Block) a
   = Validator
-      (ReaderT ValidateEnv (ExceptT (ValidationTrace IsInvalid) (State [ValidationTrace IsValid])) a)
+      (ReaderT ValidateEnv (ExceptT (ValidationTrace b IsInvalid) (State [ValidationTrace b IsValid])) a)
   deriving (Functor, Applicative, Monad, MonadReader ValidateEnv)
+
+type Validator = ValidatorT TermBlock
 
 type TermValidator = RuleTerm -> Validator ()
 
@@ -137,24 +138,13 @@ instance Alternative Validator where
               _ -> put ySt >> throwError yFail
   empty = failWith AlternativeFail
 
-closeSteps :: [ValidationTrace IsValid] -> StepTrace v -> StepTrace v
+closeSteps :: [ValidationTrace b IsValid] -> StepTrace b v -> StepTrace b v
 closeSteps steps cap = foldl' (flip Step) cap steps
-
-capture :: Validator a -> Validator (Either (StepTrace IsInvalid) (a, StepTrace IsValid))
-capture (Validator m) = Validator $ do
-  saved <- get
-  put []
-  r <- tryError m
-  steps <- get
-  put saved
-  pure $ case r of
-    Left err -> Left $ closeSteps steps (StepFailed err)
-    Right x -> Right (x, closeSteps steps StepsDone)
 
 accept :: CTree ValidatorPhase -> Validator ()
 accept rule = Validator $ modify (TerminalRule (mapIndex rule) :)
 
-failWith :: ValidationTrace IsInvalid -> Validator a
+failWith :: ValidationTrace b IsInvalid -> ValidatorT b a
 failWith err = Validator $ throwError err
 
 -- | Run an action with the given local generic bindings installed.
@@ -163,7 +153,7 @@ withLocalValidateBindings ::
 withLocalValidateBindings binds =
   local (\env -> env {veLocal = binds `Map.union` veLocal env})
 
-runValidator :: ValidateEnv -> Validator a -> Evidenced StepTrace
+runValidator :: ValidateEnv -> ValidatorT b a -> Evidenced (StepTrace b)
 runValidator env (Validator m) = mkStepTrace $ runState (runExceptT $ runReaderT m env) []
   where
     mkStepTrace (eFail, st) =
@@ -255,163 +245,151 @@ data ControlInfo = ControlInfo
 instance Pretty ControlInfo where
   pretty ControlInfo {..} = pretty ciOp <+> pretty ciRule
 
-data StepTrace v where
-  StepsDone :: StepTrace IsValid
-  Step :: ValidationTrace IsValid -> StepTrace v -> StepTrace v
-  StepFailed :: ValidationTrace IsInvalid -> StepTrace IsInvalid
+data StepTrace (b :: Block) (v :: Validity) where
+  StepsDone :: StepTrace b IsValid
+  Step :: ValidationTrace b IsValid -> StepTrace b v -> StepTrace b v
+  StepFailed :: ValidationTrace b IsInvalid -> StepTrace b IsInvalid
 
-deriving instance Show (StepTrace v)
+toEvidencedList :: StepTrace b v -> [Evidenced (ValidationTrace b)]
+toEvidencedList = \case
+  StepsDone -> []
+  StepFailed x -> [evidence x]
+  Step x next -> evidence x : toEvidencedList next
 
-instance IsValidationTrace StepTrace where
+stepsTakeValid :: StepTrace b v -> [ValidationTrace b IsValid]
+stepsTakeValid = \case
+  Step x next -> x : stepsTakeValid next
+  _ -> []
+
+stepFailure :: StepTrace b v -> Maybe (ValidationTrace b IsInvalid)
+stepFailure = \case
+  StepFailed x -> Just x
+  StepsDone -> Nothing
+  Step _ next -> stepFailure next
+
+deriving instance Show (StepTrace b v)
+
+instance IsValidationTrace (StepTrace b) where
   traceValidity = \case
     StepsDone -> SValid
     StepFailed _ -> SInvalid
     Step _ next -> traceValidity next
   measureProgress = \case
-    StepsDone -> Progress 1 0
+    StepsDone -> mempty
     StepFailed x -> measureProgress x
     Step this next -> measureProgress this <> measureProgress next
 
-data ValidationTrace (v :: Validity) where
-  AlternativeFail :: ValidationTrace IsInvalid
-  UnapplicableRule :: CTree MonoSimplePhase -> ValidationTrace IsInvalid
-  TerminalRule :: CTree MonoSimplePhase -> ValidationTrace IsValid
-  ControlTrace :: ControlInfo -> ValidationTrace IsValid -> ValidationTrace IsValid
-  ReferenceRule :: Name -> ValidationTrace v -> ValidationTrace v
-  CustomFailure :: Text -> ValidationTrace IsInvalid
-  UnsatisfiedControl :: CtlOp -> CTree MonoSimplePhase -> ValidationTrace IsInvalid
-  ChoiceBranch :: Int -> ValidationTrace IsValid -> ValidationTrace IsValid
-  ListTrace :: ListValidationTrace v -> ValidationTrace v
-  MapTrace :: MapValidationTrace v -> ValidationTrace v
-  TagTrace :: Word64 -> ValidationTrace v -> ValidationTrace v
-  InvalidTag :: Word64 -> Word64 -> ValidationTrace IsInvalid
+type data Block = TermBlock | ListBlock | MapBlock
 
-deriving instance Show (ValidationTrace v)
-
-data ListValidationTrace (v :: Validity) where
-  ListValidationDone :: ListValidationTrace IsValid
-  ListValidationLeftoverTerms ::
+data ValidationTrace (b :: Block) (v :: Validity) where
+  AlternativeFail :: ValidationTrace b IsInvalid
+  UnapplicableRule :: CTree MonoSimplePhase -> ValidationTrace TermBlock IsInvalid
+  TerminalRule :: CTree MonoSimplePhase -> ValidationTrace TermBlock IsValid
+  ControlTrace ::
+    ControlInfo -> ValidationTrace TermBlock IsValid -> ValidationTrace TermBlock IsValid
+  ReferenceRule :: Name -> StepTrace TermBlock v -> ValidationTrace TermBlock v
+  CustomSuccess :: ValidationTrace TermBlock IsValid
+  CustomFailure :: Text -> ValidationTrace b IsInvalid
+  UnsatisfiedControl :: CtlOp -> CTree MonoSimplePhase -> ValidationTrace TermBlock IsInvalid
+  ChoiceBranch :: Int -> StepTrace TermBlock IsValid -> ValidationTrace TermBlock IsValid
+  TagTrace :: Word64 -> StepTrace TermBlock v -> ValidationTrace TermBlock v
+  InvalidTag :: Word64 -> Word64 -> ValidationTrace TermBlock IsInvalid
+  ArrayTrace :: StepTrace ListBlock v -> ValidationTrace TermBlock v
+  ArrayElement ::
+    CTree MonoSimplePhase ->
+    StepTrace TermBlock IsValid ->
+    ValidationTrace ListBlock IsValid
+  ArrayLeftoverTerms ::
     NonEmpty Term ->
-    Maybe (CTree MonoSimplePhase, ValidationTrace IsInvalid) ->
-    ListValidationTrace IsInvalid
-  ListValidationUnappliedRule ::
+    Maybe (CTree MonoSimplePhase, StepTrace TermBlock IsInvalid) ->
+    ValidationTrace ListBlock IsInvalid
+  ArrayLeftoverRule ::
     CTree MonoSimplePhase ->
-    ListValidationTrace IsInvalid
-  ListValidationConsume ::
+    ValidationTrace ListBlock IsInvalid
+  ArrayMissingRequired ::
     CTree MonoSimplePhase ->
-    ValidationTrace IsValid ->
-    ListValidationTrace v ->
-    ListValidationTrace v
-  ListValidationMissingRequired ::
-    CTree MonoSimplePhase ->
-    ValidationTrace IsInvalid ->
-    ListValidationTrace IsInvalid
-  ListValidationConsumeGroup ::
+    StepTrace TermBlock IsInvalid ->
+    ValidationTrace ListBlock IsInvalid
+  ArrayConsumeGroup ::
     [Name] ->
-    ListValidationTrace IsValid ->
-    ListValidationTrace v ->
-    ListValidationTrace v
-  ListValidationBadGroup ::
-    [Name] ->
-    ListValidationTrace IsInvalid ->
-    ListValidationTrace IsInvalid
-
-deriving instance Show (ListValidationTrace v)
-
-data MapValidationTrace (v :: Validity) where
-  MapValidationDone :: MapValidationTrace IsValid
-  MapValidationLeftoverKVs ::
-    (Term, Term) ->
-    Maybe (CTree MonoSimplePhase, MapValidationTrace IsInvalid) ->
-    MapValidationTrace IsInvalid
-  MapValidationUnappliedRules :: NonEmpty (CTree MonoSimplePhase) -> MapValidationTrace IsInvalid
-  MapValidationInvalidValue ::
+    StepTrace ListBlock v ->
+    ValidationTrace ListBlock v
+  MapTrace :: StepTrace MapBlock v -> ValidationTrace TermBlock v
+  MapEntry ::
     CTree MonoSimplePhase ->
-    ValidationTrace IsValid ->
-    ValidationTrace IsInvalid ->
-    MapValidationTrace IsInvalid
-  MapValidationConsume ::
+    StepTrace TermBlock IsValid ->
+    StepTrace TermBlock IsValid ->
+    ValidationTrace MapBlock IsValid
+  MapInvalidValue ::
     CTree MonoSimplePhase ->
-    ValidationTrace IsValid ->
-    ValidationTrace IsValid ->
-    MapValidationTrace v ->
-    MapValidationTrace v
-  MapValidationDuplicateKeys ::
+    StepTrace TermBlock IsValid ->
+    StepTrace TermBlock IsInvalid ->
+    ValidationTrace MapBlock IsInvalid
+  MapDuplicateKeys ::
     CTree MonoSimplePhase ->
     CanonicalTerm ->
-    ValidationTrace IsValid ->
-    MapValidationTrace IsInvalid
+    StepTrace TermBlock IsValid ->
+    ValidationTrace MapBlock IsInvalid
+  MapUnappliedRules :: NonEmpty (CTree MonoSimplePhase) -> ValidationTrace MapBlock IsInvalid
+  MapLeftoverEntries ::
+    (Term, Term) ->
+    Maybe (CTree MonoSimplePhase, StepTrace MapBlock IsInvalid) ->
+    ValidationTrace MapBlock IsInvalid
 
-deriving instance Show (MapValidationTrace v)
+deriving instance Show (ValidationTrace b v)
 
-instance IsValidationTrace ValidationTrace where
+instance IsValidationTrace (ValidationTrace b) where
   traceValidity = \case
     TerminalRule {} -> SValid
     ControlTrace {} -> SValid
-    ChoiceBranch {} -> SValid
+    AlternativeFail -> SInvalid
     UnapplicableRule {} -> SInvalid
+    ReferenceRule _ x -> traceValidity x
+    CustomSuccess -> SValid
     CustomFailure {} -> SInvalid
     UnsatisfiedControl {} -> SInvalid
-    InvalidTag {} -> SInvalid
-    ReferenceRule _ x -> traceValidity x
-    ListTrace x -> traceValidity x
-    MapTrace x -> traceValidity x
+    ChoiceBranch {} -> SValid
     TagTrace _ x -> traceValidity x
-    AlternativeFail -> SInvalid
+    InvalidTag {} -> SInvalid
+    ArrayTrace x -> traceValidity x
+    ArrayElement {} -> SValid
+    ArrayLeftoverTerms {} -> SInvalid
+    ArrayLeftoverRule {} -> SInvalid
+    ArrayMissingRequired {} -> SInvalid
+    ArrayConsumeGroup _ x -> traceValidity x
+    MapTrace x -> traceValidity x
+    MapEntry {} -> SValid
+    MapInvalidValue {} -> SInvalid
+    MapDuplicateKeys {} -> SInvalid
+    MapUnappliedRules {} -> SInvalid
+    MapLeftoverEntries {} -> SInvalid
 
   measureProgress = \case
     TerminalRule {} -> Progress 1 0
     ControlTrace _ x -> measureProgress x
-    ChoiceBranch _ x -> measureProgress x
+    AlternativeFail -> mempty
     UnapplicableRule {} -> mempty
+    ReferenceRule _ x -> increaseRefProgress $ measureProgress x
+    CustomSuccess -> Progress 1 0
     CustomFailure {} -> mempty
     UnsatisfiedControl {} -> mempty
-    InvalidTag {} -> mempty
-    AlternativeFail -> mempty
-    ReferenceRule _ x -> increaseRefProgress $ measureProgress x
-    ListTrace x -> measureProgress x
-    MapTrace x -> measureProgress x
+    ChoiceBranch _ x -> measureProgress x
     TagTrace _ x -> increaseTermProgress $ measureProgress x
-
-instance IsValidationTrace ListValidationTrace where
-  traceValidity = \case
-    ListValidationDone -> SValid
-    ListValidationLeftoverTerms {} -> SInvalid
-    ListValidationUnappliedRule {} -> SInvalid
-    ListValidationMissingRequired {} -> SInvalid
-    ListValidationBadGroup _ _ -> SInvalid
-    ListValidationConsume _ _ x -> traceValidity x
-    ListValidationConsumeGroup _ _ x -> traceValidity x
-
-  measureProgress = \case
-    ListValidationDone -> Progress 1 0
-    ListValidationConsume _ _ x -> increaseTermProgress $ measureProgress x
-    ListValidationLeftoverTerms _ Nothing -> mempty
-    ListValidationLeftoverTerms _ (Just (_, trc)) -> measureProgress trc
-    ListValidationMissingRequired _ _ -> mempty
-    ListValidationUnappliedRule _ -> mempty
-    ListValidationConsumeGroup rs g x -> Progress 0 (length rs) <> measureProgress g <> measureProgress x
-    ListValidationBadGroup rs x -> Progress 0 (length rs) <> measureProgress x
-
-instance IsValidationTrace MapValidationTrace where
-  traceValidity = \case
-    MapValidationDone -> SValid
-    MapValidationLeftoverKVs _ _ -> SInvalid
-    MapValidationUnappliedRules _ -> SInvalid
-    MapValidationInvalidValue {} -> SInvalid
-    MapValidationDuplicateKeys {} -> SInvalid
-    MapValidationConsume _ _ _ x -> traceValidity x
-
-  measureProgress = \case
-    MapValidationDone -> Progress 1 0
-    MapValidationLeftoverKVs _ Nothing -> mempty
-    MapValidationLeftoverKVs _ (Just (_, trc)) -> measureProgress trc
-    MapValidationUnappliedRules _ -> mempty
-    MapValidationConsume _ kTrc vTrc x ->
-      measureProgress kTrc <> measureProgress vTrc <> measureProgress x
-    MapValidationInvalidValue _ kTrc vTrc ->
-      measureProgress kTrc <> measureProgress vTrc
-    MapValidationDuplicateKeys _ _ trc -> measureProgress trc
+    InvalidTag {} -> mempty
+    ArrayTrace x -> increaseTermProgress $ measureProgress x
+    ArrayElement {} -> Progress 1 0
+    ArrayLeftoverTerms _ Nothing -> mempty
+    ArrayLeftoverTerms _ (Just (_, x)) -> measureProgress x
+    ArrayLeftoverRule {} -> mempty
+    ArrayMissingRequired {} -> mempty
+    ArrayConsumeGroup ns x -> Progress 0 (length ns) <> measureProgress x
+    MapTrace x -> increaseTermProgress $ measureProgress x
+    MapEntry _ k v -> measureProgress k <> measureProgress v
+    MapInvalidValue _ k v -> measureProgress k <> measureProgress v
+    MapDuplicateKeys _ _ x -> measureProgress x
+    MapUnappliedRules {} -> mempty
+    MapLeftoverEntries _ Nothing -> mempty
+    MapLeftoverEntries _ (Just (_, x)) -> measureProgress x
 
 evidence :: (Show (t v), IsValidationTrace t) => t v -> Evidenced t
 evidence x = Evidenced (traceValidity x) x
@@ -440,114 +418,26 @@ newtype TraceOptions = TraceOptions
 defaultTraceOptions :: TraceOptions
 defaultTraceOptions = TraceOptions {toFoldValid = False}
 
-prettyListValidationResult :: TraceOptions -> ListValidationTrace v -> Doc AnsiStyle
-prettyListValidationResult opts@TraceOptions {..} = \case
-  ListValidationDone -> mempty
-  ListValidationLeftoverTerms _ Nothing ->
-    annotate (color Red) "leftover elements not matched by any rule"
-  ListValidationLeftoverTerms _ (Just (rule, trc)) ->
-    hang 2 $
-      vsep
-        [ annotate (color Red) "leftover elements, closest matching rule:"
-        , annotate (color Green) $ pretty $ show rule
-        , nestContainer $ prettyValidationTrace opts trc
+prettyStepTrace :: Bool -> TraceOptions -> StepTrace b v -> Doc AnsiStyle
+prettyStepTrace mayFold opts@TraceOptions {..} steps
+  | toFoldValid && mayFold =
+      vsep $
+        [ annotate italicized $ "... " <> pretty (length validInit) <> " valid entries not shown"
+        | not $ null validInit
         ]
-  ListValidationUnappliedRule r ->
-    hang 2 $
-      vsep
-        [ annotate (color Red) "required rule not satisfied:"
-        , pretty r
-        ]
-  ListValidationConsume _ t c
-    | toFoldValid -> foldValid 1 c
-    | otherwise -> vsep $ continue c [prettyValidationTrace opts t]
-  ListValidationMissingRequired _ t ->
-    vsep
-      [ annotate (color Red) "failed to apply required rule:"
-      , nestContainer $ prettyValidationTrace opts t
-      ]
-  ListValidationConsumeGroup refs x c -> vsep . continue c $ prettyGroup SValid refs x
-  ListValidationBadGroup refs x -> vsep $ prettyGroup SInvalid refs x
+          <> [ prettyValidationTrace opts f
+             | f <- maybeToList $ stepFailure steps
+             ]
+  | otherwise =
+      vsep $ foldEvidenced (prettyValidationTrace opts) <$> toEvidencedList steps
   where
-    -- This prevents unnecessary empty lines
-    continue ListValidationDone l = l
-    continue x l = l <> [prettyListValidationResult opts x]
+    validInit = stepsTakeValid steps
 
-    prettyGroup :: SValidity v -> [Name] -> ListValidationTrace v -> [Doc AnsiStyle]
-    prettyGroup v refs x = go refs
-      where
-        go (n : ns) =
-          [ "ref" <+> pretty n
-          , nestContainer . vsep $ go ns
-          ]
-        go [] =
-          [ case v of
-              SValid -> "grp"
-              SInvalid -> "grp" <+> annotate (color Red) "(fail)"
-          , nestContainer $ prettyListValidationResult opts x
-          ]
-
-    foldValid !n (ListValidationConsume _ _ c) = foldValid (n + 1) c
-    foldValid !n t =
-      vsep $ continue t [annotate italicized $ pretty (n :: Int) <> " valid elements"]
-
-prettyMapValidationResult :: TraceOptions -> MapValidationTrace v -> Doc AnsiStyle
-prettyMapValidationResult opts@TraceOptions {..} = \case
-  MapValidationDone -> mempty
-  MapValidationLeftoverKVs _ Nothing ->
-    annotate (color Red) "leftover key-value pairs not matched by any rule"
-  MapValidationLeftoverKVs _ (Just (rule, trc)) ->
-    hang 2 $
-      vsep
-        [ annotate (color Red) "leftover key-value pairs, closest matching rule:"
-        , annotate (color Green) $ pretty rule
-        , nestContainer $ prettyMapValidationResult opts trc
-        ]
-  MapValidationUnappliedRules rs ->
-    hang 2 $
-      vsep
-        [ annotate (color Red) "not all required rules have been applied:"
-        , vsep (NE.toList $ pretty <$> rs)
-        ]
-  MapValidationConsume _ k v c
-    | toFoldValid -> foldValid 1 c
-    | otherwise ->
-        vsep $
-          continue
-            c
-            [ "key:"
-            , nestContainer $ prettyValidationTrace opts k
-            , "value:"
-            , nestContainer $ prettyValidationTrace opts v
-            ]
-  MapValidationInvalidValue _ k v ->
-    vsep
-      [ "key:"
-      , nestContainer $ prettyValidationTrace opts k
-      , "value:" <+> annotate (color Red) "(fail)"
-      , nestContainer $ prettyValidationTrace opts v
-      ]
-  MapValidationDuplicateKeys _ _ trc ->
-    vsep
-      [ "key: " <> annotate (color Red) "(duplicate)"
-      , nestContainer $ prettyValidationTrace opts trc
-      ]
-  where
-    foldValid !n (MapValidationConsume _ _ _ c) = foldValid (n + 1) c
-    foldValid !n t =
-      vsep . continue t $
-        [ annotate italicized $ pretty (n :: Int) <> " valid key-value pairs"
-        , "..."
-        ]
-
-    -- This prevents unnecessary empty lines
-    continue MapValidationDone l = l
-    continue x l = l <> [prettyMapValidationResult opts x]
-
-prettyValidationTrace :: TraceOptions -> ValidationTrace v -> Doc AnsiStyle
+prettyValidationTrace :: TraceOptions -> ValidationTrace b v -> Doc AnsiStyle
 prettyValidationTrace opts = \case
-  UnapplicableRule x -> annotate (color Red) $ vsep ["failed to apply: ", indent 2 $ pretty x]
   TerminalRule x -> "app: " <> annotate (color Green) (pretty x)
+  AlternativeFail -> mempty
+  UnapplicableRule x -> annotate (color Red) $ vsep ["failed to apply: ", indent 2 $ pretty x]
   ControlTrace ci x ->
     vsep
       [ prettyValidationTrace opts x
@@ -556,13 +446,14 @@ prettyValidationTrace opts = \case
   ChoiceBranch i c ->
     vsep
       [ "choice (idx: " <> pretty i <> ")"
-      , nestContainer $ prettyValidationTrace opts c
+      , nestContainer $ prettyStepTrace False opts c
       ]
   ReferenceRule (Name n) x ->
     vsep
       [ "ref: " <> annotate (color Blue) (pretty n)
-      , nestContainer $ prettyValidationTrace opts x
+      , nestContainer $ prettyStepTrace False opts x
       ]
+  CustomSuccess -> "<custom validator>"
   CustomFailure e -> annotate (color Red) $ pretty e
   UnsatisfiedControl op ctl ->
     annotate (color Red) $
@@ -570,26 +461,95 @@ prettyValidationTrace opts = \case
         [ "unsatisfied control:"
         , indent 2 $ "." <> pretty op <+> pretty ctl
         ]
-  ListTrace l ->
+  ArrayTrace l ->
     vsep
       [ "array"
-      , nestContainer $ prettyListValidationResult opts l
+      , nestContainer $ prettyStepTrace False opts l
       ]
   MapTrace m ->
     vsep
       [ "map"
-      , nestContainer $ prettyMapValidationResult opts m
+      , nestContainer $ prettyStepTrace False opts m
       ]
   TagTrace t x ->
     vsep
       [ "tag:" <+> annotate (color Green) ("#6." <> pretty t)
-      , nestContainer $ prettyValidationTrace opts x
+      , nestContainer $ prettyStepTrace False opts x
       ]
   InvalidTag expected actual ->
     "expected tag #6." <> pretty expected <> ", got #6." <> pretty actual
-  AlternativeFail -> mempty
+  ArrayLeftoverTerms _ Nothing ->
+    annotate (color Red) "leftover elements not matched by any rule"
+  ArrayLeftoverTerms _ (Just (rule, trc)) ->
+    hang 2 $
+      vsep
+        [ annotate (color Red) "leftover elements, closest matching rule:"
+        , annotate (color Green) $ pretty $ show rule
+        , nestContainer $ prettyStepTrace True opts trc
+        ]
+  ArrayLeftoverRule r ->
+    hang 2 $
+      vsep
+        [ annotate (color Red) "required rule not satisfied:"
+        , pretty r
+        ]
+  ArrayElement _ steps -> vsep [prettyStepTrace True opts steps]
+  ArrayMissingRequired _ t ->
+    vsep
+      [ annotate (color Red) "failed to apply required rule:"
+      , nestContainer $ prettyStepTrace True opts t
+      ]
+  ArrayConsumeGroup refs x -> vsep $ prettyGroup refs x
+  MapLeftoverEntries _ Nothing ->
+    annotate (color Red) "leftover key-value pairs not matched by any rule"
+  MapLeftoverEntries _ (Just (rule, trc)) ->
+    hang 2 $
+      vsep
+        [ annotate (color Red) "leftover key-value pairs, closest matching rule:"
+        , annotate (color Green) $ pretty rule
+        , nestContainer $ prettyStepTrace True opts trc
+        ]
+  MapUnappliedRules rs ->
+    hang 2 $
+      vsep
+        [ annotate (color Red) "not all required rules have been applied:"
+        , vsep (NE.toList $ pretty <$> rs)
+        ]
+  MapEntry _ k v ->
+    vsep
+      [ "key:"
+      , nestContainer $ prettyStepTrace True opts k
+      , "value:"
+      , nestContainer $ prettyStepTrace True opts v
+      ]
+  MapInvalidValue _ k v ->
+    vsep
+      [ "key:"
+      , nestContainer $ prettyStepTrace False opts k
+      , "value:" <+> annotate (color Red) "(fail)"
+      , nestContainer $ prettyStepTrace True opts v
+      ]
+  MapDuplicateKeys _ _ trc ->
+    vsep
+      [ "key: " <> annotate (color Red) "(duplicate)"
+      , nestContainer $ prettyStepTrace False opts trc
+      ]
+  where
+    prettyGroup :: [Name] -> StepTrace ListBlock v -> [Doc AnsiStyle]
+    prettyGroup refs x = go refs
+      where
+        go (n : ns) =
+          [ "ref" <+> pretty n
+          , nestContainer . vsep $ go ns
+          ]
+        go [] =
+          [ case traceValidity x of
+              SValid -> "grp"
+              SInvalid -> "grp" <+> annotate (color Red) "(fail)"
+          , nestContainer $ prettyStepTrace True opts x
+          ]
 
-showValidationTrace :: ValidationTrace v -> String
+showValidationTrace :: ValidationTrace b v -> String
 showValidationTrace =
   T.unpack
     . Ansi.renderStrict
