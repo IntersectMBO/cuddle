@@ -7,6 +7,7 @@
 {-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE TypeData #-}
 {-# LANGUAGE TypeFamilies #-}
+{-# OPTIONS_GHC -Wno-orphans #-}
 
 -- | Module for building CDDL in Haskell
 --
@@ -26,7 +27,6 @@ module Codec.CBOR.Cuddle.Huddle (
   Type0 (..),
 
   -- * AST extensions
-  HuddleStage,
   C.XCddl (..),
   C.XTerm (..),
   C.XRule (..),
@@ -118,7 +118,11 @@ import Codec.CBOR.Cuddle.CDDL (
   GenericParameter (..),
   HasName (..),
   Name (..),
+  XCddl,
   XRule,
+  XTerm,
+  XXTopLevel,
+  XXType2,
  )
 import Codec.CBOR.Cuddle.CDDL qualified as C
 import Codec.CBOR.Cuddle.CDDL.CtlOp qualified as CtlOp
@@ -130,8 +134,11 @@ import Codec.CBOR.Cuddle.CDDL.Custom.Generator (
   simpleGen,
  )
 import Codec.CBOR.Cuddle.CDDL.Custom.Validator (HasValidator (..), TermValidator)
+import Codec.CBOR.Cuddle.CDDL.Phase (HuddleStage)
 import Codec.CBOR.Cuddle.Comments (Comment, HasComment (..))
 import Codec.CBOR.Cuddle.Comments qualified as C
+import Codec.CBOR.Cuddle.IndexMappable (IndexMappable (..))
+import Codec.CBOR.Cuddle.Parser (ParserStage, XCddl (..), XTerm (..), XXTopLevel (..), XXType2 (..))
 import Control.Monad (when)
 import Control.Monad.State (MonadState (get), State, execState, modify)
 import Data.ByteString (ByteString)
@@ -154,8 +161,6 @@ import GHC.Generics (Generic)
 import Optics.Core (lens, view, (%), (%~), (&))
 import Optics.Core qualified as L
 import Prelude hiding ((/))
-
-type data HuddleStage
 
 newtype instance C.XTerm HuddleStage = HuddleXTerm C.Comment
   deriving (Generic, Semigroup, Monoid, Show, Eq)
@@ -1392,3 +1397,19 @@ withOverrideCBORGen f = withOverrideGenerator $ simpleGen . f . tgGenerator
 
 withValidator :: HasValidator a => TermValidator -> a -> a
 withValidator p = L.set validatorL $ Just p
+
+-- * IndexMappable
+
+-- ParserStage -> HuddleStage
+
+instance IndexMappable XCddl ParserStage HuddleStage where
+  mapIndex (ParserXCddl c) = HuddleXCddl c
+
+instance IndexMappable XXTopLevel ParserStage HuddleStage where
+  mapIndex (ParserXXTopLevel c) = HuddleXXTopLevel c
+
+instance IndexMappable XXType2 ParserStage HuddleStage where
+  mapIndex (ParserXXType2 c) = HuddleXXType2 c
+
+instance IndexMappable XTerm ParserStage HuddleStage where
+  mapIndex (ParserXTerm c) = HuddleXTerm c

@@ -43,7 +43,7 @@ import Codec.CBOR.Cuddle.CBOR.Canonical (
   toCanonical,
   uintMax,
  )
-import Codec.CBOR.Cuddle.CBOR.Validator (validateAgainst)
+import Codec.CBOR.Cuddle.CBOR.Validator (validateTerm)
 import Codec.CBOR.Cuddle.CDDL (
   GRef (..),
   Name (..),
@@ -76,11 +76,12 @@ import Codec.CBOR.Cuddle.CDDL.Custom.Generator (
  )
 import Codec.CBOR.Cuddle.CDDL.Custom.Generator qualified as Gen
 import Codec.CBOR.Cuddle.CDDL.Custom.Validator (
-  CustomValidatorResult (..),
+  Evidenced (..),
+  SValidity (..),
   ValidatorPhase,
-  runValidator,
  )
-import Codec.CBOR.Cuddle.CDDL.Resolve (XXCTree (..), showSimple)
+import Codec.CBOR.Cuddle.CDDL.Phase (showSimple)
+import Codec.CBOR.Cuddle.CDDL.Resolve (XXCTree (..))
 import Codec.CBOR.Cuddle.IndexMappable (IndexMappable (..))
 import Codec.CBOR.Cuddle.Interval (
   Interval (..),
@@ -474,9 +475,9 @@ genForCTree node = case node of
 
 isInvalidAgainstNode :: CTreeRoot GenPhase -> Term -> CTree GenPhase -> Bool
 isInvalidAgainstNode cTreeRoot term node =
-  case runValidator (validateAgainst term $ mapIndex node) (mapIndex cTreeRoot) of
-    CustomValidatorSuccess -> False
-    CustomValidatorFailure {} -> True
+  case validateTerm (mapIndex cTreeRoot) term $ mapIndex node of
+    Evidenced SValid _ -> False
+    Evidenced SInvalid _ -> True
 
 -- | Generate a map from a list of nodes
 genMap ::

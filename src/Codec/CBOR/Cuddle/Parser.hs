@@ -18,6 +18,7 @@ import Codec.CBOR.Cuddle.Comments (
   (!*>),
   (<*!),
  )
+import Codec.CBOR.Cuddle.IndexMappable (IndexMappable)
 import Codec.CBOR.Cuddle.Parser.Lexer (
   Parser,
   charInRange,
@@ -481,3 +482,17 @@ sepBy1' :: MonadParsec e s m => m a -> m sep -> m (NonEmpty a)
 sepBy1' p sep = NE.fromList <$> go
   where
     go = liftA2 (:) p (many (try $ sep *> p))
+
+-- * IndexMappable
+
+-- ParserStage ~ ParserStage
+
+instance IndexMappable XCddl ParserStage ParserStage
+
+instance IndexMappable XXTopLevel ParserStage ParserStage
+
+instance IndexMappable XXType2 ParserStage ParserStage
+
+instance IndexMappable XTerm ParserStage ParserStage
+
+instance IndexMappable XRule ParserStage ParserStage

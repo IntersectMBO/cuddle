@@ -8,23 +8,23 @@ module Main (main) where
 
 import Codec.CBOR.Cuddle.CBOR.Generator (generateFromName)
 import Codec.CBOR.Cuddle.CBOR.Validator
-import Codec.CBOR.Cuddle.CBOR.Validator.Trace (
-  Evidenced (..),
-  SValidity (..),
-  TraceOptions (..),
-  prettyValidationTrace,
- )
-import Codec.CBOR.Cuddle.CDDL (CDDL, Name (..), fromRules, sortCDDL)
+import Codec.CBOR.Cuddle.CDDL (CDDL, Name (..), fromRules, mapCDDLDropExt, sortCDDL)
 import Codec.CBOR.Cuddle.CDDL.CTree (CTreeRoot)
 import Codec.CBOR.Cuddle.CDDL.Custom.Generator (
   GenConfig (..),
   runCBORGen,
  )
+import Codec.CBOR.Cuddle.CDDL.Custom.Validator (
+  Evidenced (..),
+  SValidity (..),
+  TraceOptions (..),
+  prettyValidationTrace,
+ )
 import Codec.CBOR.Cuddle.CDDL.Postlude (appendPostlude)
 import Codec.CBOR.Cuddle.CDDL.Resolve (
   fullResolveCDDL,
  )
-import Codec.CBOR.Cuddle.IndexMappable (IndexMappable (..), mapCDDLDropExt)
+import Codec.CBOR.Cuddle.IndexMappable (IndexMappable (..))
 import Codec.CBOR.Cuddle.Parser (ParserStage, pCDDL)
 import Codec.CBOR.Cuddle.Pretty (PrettyStage, renderCDDL)
 import Codec.CBOR.FlatTerm (toFlatTerm)

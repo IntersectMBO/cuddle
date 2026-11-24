@@ -1,10 +1,12 @@
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE DerivingStrategies #-}
+{-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE UndecidableInstances #-}
 
 module Codec.CBOR.Cuddle.CDDL.CTree (
-  XXCTree,
+  XXCTree (..),
   CTree (..),
   traverseCTree,
   foldCTree,
@@ -16,8 +18,14 @@ module Codec.CBOR.Cuddle.CDDL.CTree (
 ) where
 
 import Codec.CBOR.Cuddle.CBOR.Canonical (nintMin, uintMax)
-import Codec.CBOR.Cuddle.CDDL (Name, OccurrenceIndicator, RangeBound, Value)
+import Codec.CBOR.Cuddle.CDDL (
+  Name,
+  OccurrenceIndicator (..),
+  RangeBound (..),
+  Value,
+ )
 import Codec.CBOR.Cuddle.CDDL.CtlOp
+import Codec.CBOR.Cuddle.CDDL.Phase (MonoSimplePhase)
 import Control.Monad.Identity (Identity (..))
 import Data.Hashable (Hashable)
 import Data.List.NonEmpty qualified as NE
@@ -25,6 +33,7 @@ import Data.Map.Strict qualified as Map
 import Data.Word (Word64)
 import GHC.Generics (Generic)
 import Generic.Random (genericArbitraryU)
+import Prettyprinter
 import Test.QuickCheck (Arbitrary (..))
 
 --------------------------------------------------------------------------------
@@ -61,6 +70,29 @@ deriving instance Eq (Node f) => Eq (CTree f)
 deriving instance Show (Node f) => Show (CTree f)
 
 instance Hashable (Node f) => Hashable (CTree f)
+
+instance Pretty (XXCTree p) => Pretty (CTree p) where
+  pretty = \case
+    Literal v -> pretty v
+    Postlude v -> pretty v
+    Range lo hi ClOpen -> pretty lo <+> "..." <+> pretty hi
+    Range lo hi Closed -> pretty lo <+> ".." <+> pretty hi
+    KV k v _ -> pretty k <+> "==>" <+> pretty v
+    CTreeE x -> pretty x
+    Occur v oi ->
+      case oi of
+        OIOptional -> "?" <+> pretty v
+        OIZeroOrMore -> "*" <+> pretty v
+        OIOneOrMore -> "+" <+> pretty v
+        OIBounded lo hi -> foldMap pretty lo <> "*" <> foldMap pretty hi <+> pretty v
+    Map m -> encloseSep "{" "}" "," $ pretty <$> m
+    Array e -> list $ pretty <$> e
+    Choice c -> group . vsep . punctuate "//" $ pretty <$> NE.toList c
+    Group g -> tupled $ pretty <$> g
+    Control op tgt ctl -> pretty tgt <+> pretty op <+> pretty ctl
+    Enum e -> "&" <> pretty e
+    Unwrap x -> "~" <> pretty x
+    Tag t x -> "#6." <> pretty t <> "(" <> pretty x <> ")"
 
 -- | Traverse the CTree, carrying out the given operation at each node
 traverseCTree ::
@@ -152,7 +184,32 @@ data PTerm
   | PTUndefined
   deriving (Eq, Generic, Ord, Show, Enum, Bounded)
 
+instance Pretty PTerm where
+  pretty = \case
+    PTBool -> "bool"
+    PTUInt -> "uint"
+    PTNInt -> "nint"
+    PTInt -> "int"
+    PTHalf -> "half"
+    PTFloat -> "float"
+    PTDouble -> "double"
+    PTBytes -> "bytes"
+    PTText -> "text"
+    PTAny -> "any"
+    PTNil -> "nil"
+    PTUndefined -> "undefined"
+
 instance Arbitrary PTerm where
   arbitrary = genericArbitraryU
 
 instance Hashable PTerm
+
+-- | A simplified phase reachable from any of the function-bearing post-mono
+-- phases ('MonoReferenced', 'GenPhase', 'ValidatorPhase'). It strips the
+-- generator/validator extensions so the tree can be `Show`n, `Eq`-compared,
+-- and pretty-printed for debug output.
+newtype instance XXCTree MonoSimplePhase = MSimpleRef Name
+  deriving (Generic, Show, Eq)
+
+instance Pretty (XXCTree MonoSimplePhase) where
+  pretty (MSimpleRef n) = pretty n

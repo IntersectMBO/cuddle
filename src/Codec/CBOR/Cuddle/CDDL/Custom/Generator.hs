@@ -224,3 +224,5 @@ showConstraint = \case
   CustomControl c _ -> "." <> c
   And _ -> ".and"
   Within _ -> ".within"
+
+-- * IndexMappable

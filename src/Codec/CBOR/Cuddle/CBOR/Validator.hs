@@ -2,44 +2,42 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE ViewPatterns #-}
+{-# OPTIONS_GHC -Wno-orphans #-}
 
 module Codec.CBOR.Cuddle.CBOR.Validator (
   validateCBOR,
   validateFromName,
   validateFromGRef,
   validateAgainst,
+  validateTerm,
   ValidatorPhase,
   ValidateCBORError (..),
 ) where
 
 import Codec.CBOR.Cuddle.CBOR.Canonical (CanonicalTerm, toCanonical)
-import Codec.CBOR.Cuddle.CBOR.Validator.Trace (
-  ControlInfo (..),
-  Evidenced (..),
-  IsValidationTrace (..),
-  ListValidationTrace (..),
-  MapValidationTrace (..),
-  SValidity (..),
-  ValidationTrace (..),
-  compareEvidencedProgress,
-  evidence,
-  isValid,
-  mapTrace,
- )
 import Codec.CBOR.Cuddle.CDDL hiding (CDDL, Group, Rule)
 import Codec.CBOR.Cuddle.CDDL.CTree
 import Codec.CBOR.Cuddle.CDDL.CtlOp
 import Codec.CBOR.Cuddle.CDDL.Custom.Core (MonadCddl (..), RuleTerm (..))
 import Codec.CBOR.Cuddle.CDDL.Custom.Validator (
-  CustomValidatorResult (..),
-  TermValidator,
+  ControlInfo (..),
+  Evidenced (..),
+  ListValidationTrace (..),
+  MapValidationTrace (..),
+  SValidity (..),
   ValidateEnv (..),
+  ValidationTrace (..),
   Validator,
   ValidatorPhase,
   XXCTree (..),
+  compareEvidencedProgress,
+  evidence,
+  isValid,
+  mapTrace,
+  measureProgress,
   runValidator,
  )
-import Codec.CBOR.Cuddle.CDDL.Resolve (showSimple)
+import Codec.CBOR.Cuddle.CDDL.Phase (MonoSimplePhase, showSimple)
 import Codec.CBOR.Cuddle.IndexMappable (IndexMappable (..))
 import Codec.CBOR.Read
 import Codec.CBOR.Term
@@ -131,7 +129,7 @@ validateTerm cddl term rule
   | CTreeE (VRuleRef n) <- rule =
       dereferenceAndValidate cddl n (validateTerm cddl term)
   | CTreeE (VValidator v _) <- rule =
-      runCustomValidator cddl (SingleTerm term) v
+      runValidator (v $ SingleTerm term) cddl
   | otherwise =
       case term of
         TInt i -> validateInteger cddl (fromIntegral i) rule
@@ -154,18 +152,6 @@ validateTerm cddl term rule
 
 terminal :: CTree ValidatorPhase -> Evidenced ValidationTrace
 terminal = evidence . TerminalRule . mapIndex
-
--- | Run a custom validator on a term. This is used by type-specific validators
--- when they encounter a 'VValidator' node after dereferencing a rule reference.
-runCustomValidator ::
-  CTreeRoot ValidatorPhase ->
-  RuleTerm ->
-  TermValidator ->
-  Evidenced ValidationTrace
-runCustomValidator cddl term validator =
-  case runValidator (validator term) cddl of
-    CustomValidatorSuccess -> evidence CustomSuccess
-    CustomValidatorFailure err -> evidence $ CustomFailure err
 
 unapplicable :: CTree ValidatorPhase -> Evidenced ValidationTrace
 unapplicable = evidence . UnapplicableRule . mapIndex
@@ -193,7 +179,7 @@ validateInteger ::
 validateInteger cddl i rule =
   case rule of
     CTreeE (VRuleRef n) -> dereferenceAndValidate cddl n $ validateInteger cddl i
-    CTreeE (VValidator v _) -> runCustomValidator cddl (SingleTerm $ TInteger i) v
+    CTreeE (VValidator v _) -> runValidator (v $ SingleTerm $ TInteger i) cddl
     -- echo "C24101" | xxd -r -p - example.cbor
     -- echo "foo = int" > a.cddl
     -- cddl a.cddl validate example.cbor
@@ -363,7 +349,7 @@ validateHalf ::
   CTree ValidatorPhase ->
   Evidenced ValidationTrace
 validateHalf cddl f (CTreeE (VRuleRef n)) = dereferenceAndValidate cddl n $ validateHalf cddl f
-validateHalf cddl f (CTreeE (VValidator v _)) = runCustomValidator cddl (SingleTerm $ THalf f) v
+validateHalf cddl f (CTreeE (VValidator v _)) = runValidator (v $ SingleTerm $ THalf f) cddl
 validateHalf cddl f rule =
   case rule of
     -- a = any
@@ -414,7 +400,7 @@ validateFloat ::
   Evidenced ValidationTrace
 validateFloat cddl f (CTreeE (VRuleRef n)) =
   dereferenceAndValidate cddl n $ validateFloat cddl f
-validateFloat cddl f (CTreeE (VValidator v _)) = runCustomValidator cddl (SingleTerm $ TFloat f) v
+validateFloat cddl f (CTreeE (VValidator v _)) = runValidator (v $ SingleTerm $ TFloat f) cddl
 validateFloat cddl f rule =
   case rule of
     -- a = any
@@ -476,7 +462,7 @@ validateDouble ::
   Evidenced ValidationTrace
 validateDouble cddl f (CTreeE (VRuleRef n)) =
   dereferenceAndValidate cddl n $ validateDouble cddl f
-validateDouble cddl f (CTreeE (VValidator v _)) = runCustomValidator cddl (SingleTerm $ TDouble f) v
+validateDouble cddl f (CTreeE (VValidator v _)) = runValidator (v $ SingleTerm $ TDouble f) cddl
 validateDouble cddl f rule =
   case rule of
     -- a = any
@@ -546,7 +532,7 @@ validateBool ::
   Evidenced ValidationTrace
 validateBool cddl b (CTreeE (VRuleRef n)) =
   dereferenceAndValidate cddl n $ validateBool cddl b
-validateBool cddl b (CTreeE (VValidator v _)) = runCustomValidator cddl (SingleTerm $ TBool b) v
+validateBool cddl b (CTreeE (VValidator v _)) = runValidator (v $ SingleTerm $ TBool b) cddl
 validateBool cddl b rule =
   case rule of
     -- a = any
@@ -592,7 +578,7 @@ validateSimple ::
   Evidenced ValidationTrace
 validateSimple cddl i (CTreeE (VRuleRef n)) =
   dereferenceAndValidate cddl n $ validateSimple cddl i
-validateSimple cddl i (CTreeE (VValidator v _)) = runCustomValidator cddl (SingleTerm $ TSimple i) v
+validateSimple cddl i (CTreeE (VValidator v _)) = runValidator (v $ SingleTerm $ TSimple i) cddl
 validateSimple cddl 23 rule =
   case rule of
     -- a = any
@@ -611,7 +597,7 @@ validateSimple _ n _ = error $ "Found simple different to 23! please report this
 validateNull :: CTreeRoot ValidatorPhase -> CTree ValidatorPhase -> Evidenced ValidationTrace
 validateNull cddl (CTreeE (VRuleRef n)) =
   dereferenceAndValidate cddl n $ validateNull cddl
-validateNull cddl (CTreeE (VValidator v _)) = runCustomValidator cddl (SingleTerm TNull) v
+validateNull cddl (CTreeE (VValidator v _)) = runValidator (v $ SingleTerm TNull) cddl
 validateNull cddl rule =
   case rule of
     -- a = any
@@ -629,7 +615,7 @@ validateBytes ::
   CTreeRoot ValidatorPhase -> BS.ByteString -> CTree ValidatorPhase -> Evidenced ValidationTrace
 validateBytes cddl bs (CTreeE (VRuleRef n)) =
   dereferenceAndValidate cddl n $ validateBytes cddl bs
-validateBytes cddl bs (CTreeE (VValidator v _)) = runCustomValidator cddl (SingleTerm $ TBytes bs) v
+validateBytes cddl bs (CTreeE (VValidator v _)) = runValidator (v $ SingleTerm $ TBytes bs) cddl
 validateBytes cddl bs rule =
   case rule of
     -- a = any
@@ -715,7 +701,7 @@ validateText ::
   Evidenced ValidationTrace
 validateText cddl txt (CTreeE (VRuleRef n)) =
   dereferenceAndValidate cddl n $ validateText cddl txt
-validateText cddl txt (CTreeE (VValidator v _)) = runCustomValidator cddl (SingleTerm $ TString txt) v
+validateText cddl txt (CTreeE (VValidator v _)) = runValidator (v $ SingleTerm $ TString txt) cddl
 validateText cddl txt rule =
   case rule of
     -- a = any
@@ -774,7 +760,7 @@ validateTagged ::
   CTreeRoot ValidatorPhase -> Word64 -> Term -> CTree ValidatorPhase -> Evidenced ValidationTrace
 validateTagged cddl tag term (CTreeE (VRuleRef n)) =
   dereferenceAndValidate cddl n $ validateTagged cddl tag term
-validateTagged cddl tag term (CTreeE (VValidator v _)) = runCustomValidator cddl (SingleTerm $ TTagged tag term) v
+validateTagged cddl tag term (CTreeE (VValidator v _)) = runValidator (v $ SingleTerm $ TTagged tag term) cddl
 validateTagged cddl tag term rule =
   case rule of
     Postlude PTAny -> terminal rule
@@ -828,7 +814,7 @@ validateList ::
   Evidenced ValidationTrace
 validateList cddl terms (CTreeE (VRuleRef n)) =
   dereferenceAndValidate cddl n $ validateList cddl terms
-validateList cddl terms (CTreeE (VValidator v _)) = runCustomValidator cddl (SingleTerm $ TList terms) v
+validateList cddl terms (CTreeE (VValidator v _)) = runValidator (v $ SingleTerm $ TList terms) cddl
 validateList cddl terms rule =
   case rule of
     Postlude PTAny -> terminal rule
@@ -920,7 +906,7 @@ validateMap ::
   Evidenced ValidationTrace
 validateMap cddl terms (CTreeE (VRuleRef n)) =
   dereferenceAndValidate cddl n $ validateMap cddl terms
-validateMap cddl terms (CTreeE (VValidator v _)) = runCustomValidator cddl (SingleTerm $ TMap terms) v
+validateMap cddl terms (CTreeE (VValidator v _)) = runValidator (v $ SingleTerm $ TMap terms) cddl
 validateMap cddl terms rule =
   case rule of
     Postlude PTAny -> terminal rule
@@ -1116,3 +1102,16 @@ dereferenceAndValidate cddl n f =
 range :: Ord a => RangeBound -> a -> a -> Bool
 range Closed = (<=)
 range ClOpen = (<)
+
+-- * IndexMappable
+
+-- ValidatorPhase -> MonoSimplePhase
+
+instance IndexMappable CTree ValidatorPhase MonoSimplePhase where
+  mapIndex = foldCTree mapExt mapIndex
+    where
+      mapExt (VRuleRef n) = CTreeE $ MSimpleRef n
+      mapExt (VValidator _ x) = mapIndex x
+
+instance IndexMappable CTreeRoot ValidatorPhase MonoSimplePhase where
+  mapIndex (CTreeRoot m) = CTreeRoot $ mapIndex <$> m

@@ -41,14 +41,13 @@ library
     Codec.CBOR.Cuddle.CBOR.Canonical
     Codec.CBOR.Cuddle.CBOR.Generator
     Codec.CBOR.Cuddle.CBOR.Validator
-    Codec.CBOR.Cuddle.CBOR.Validator.Trace
     Codec.CBOR.Cuddle.CDDL
     Codec.CBOR.Cuddle.CDDL.CTree
-    Codec.CBOR.Cuddle.CDDL.CTreePhase
     Codec.CBOR.Cuddle.CDDL.CtlOp
     Codec.CBOR.Cuddle.CDDL.Custom.Core
     Codec.CBOR.Cuddle.CDDL.Custom.Generator
     Codec.CBOR.Cuddle.CDDL.Custom.Validator
+    Codec.CBOR.Cuddle.CDDL.Phase
     Codec.CBOR.Cuddle.CDDL.Postlude
     Codec.CBOR.Cuddle.CDDL.Resolve
     Codec.CBOR.Cuddle.Comments

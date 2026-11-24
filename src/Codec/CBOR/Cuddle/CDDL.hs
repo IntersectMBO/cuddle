@@ -2,6 +2,7 @@
 {-# LANGUAGE DeriveAnyClass #-}
 {-# LANGUAGE DerivingStrategies #-}
 {-# LANGUAGE OverloadedLabels #-}
+{-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE UndecidableInstances #-}
 
@@ -47,11 +48,21 @@ module Codec.CBOR.Cuddle.CDDL (
   XRule,
   XXTopLevel,
   XXType2,
+  mapCDDLDropExt,
 ) where
 
 import Codec.CBOR.Cuddle.CDDL.CtlOp (CtlOp)
-import Codec.CBOR.Cuddle.Comments (CollectComments (..), Comment, HasComment (..))
+import Codec.CBOR.Cuddle.Comments (
+  CollectComments (..),
+  Comment,
+  HasComment (..),
+  prettyCommentNoBreakWS,
+ )
+import Codec.CBOR.Cuddle.IndexMappable (IndexMappable (..))
+import Data.Bifunctor (Bifunctor (..))
 import Data.ByteString qualified as B
+import Data.ByteString.Base16 qualified as B16
+import Data.ByteString.Char8 qualified as BS
 import Data.Default.Class (Default (..))
 import Data.Function (on)
 import Data.Hashable (Hashable)
@@ -64,6 +75,7 @@ import Data.Word (Word64, Word8)
 import GHC.Base (Constraint, Type)
 import GHC.Generics (Generic)
 import Optics.Core ((%), (%~), (&))
+import Prettyprinter
 
 data family XXTopLevel i
 
@@ -156,6 +168,9 @@ newtype Name = Name {unName :: T.Text}
   deriving (Generic)
   deriving (Eq, Ord, Show)
   deriving newtype (Semigroup, Monoid)
+
+instance Pretty Name where
+  pretty (Name name) = pretty name
 
 -- | A reference to a generic parameter inside the body of a generic rule.
 newtype GRef = GRef T.Text
@@ -554,6 +569,9 @@ data Value = Value ValueVariant Comment
   deriving (Eq, Generic, Show, Default)
   deriving anyclass (Hashable, CollectComments)
 
+instance Pretty Value where
+  pretty (Value v cmt) = pretty v <> prettyCommentNoBreakWS cmt
+
 value :: ValueVariant -> Value
 value x = Value x mempty
 
@@ -569,3 +587,162 @@ data ValueVariant
   | VBool Bool
   deriving (Eq, Generic, Show, Default)
   deriving anyclass (Hashable, CollectComments)
+
+instance Pretty ValueVariant where
+  pretty (VUInt i) = pretty i
+  pretty (VNInt i) = "-" <> pretty i
+  pretty (VBignum i) = pretty i
+  pretty (VFloat16 i) = pretty i
+  pretty (VFloat32 i) = pretty i
+  pretty (VFloat64 i) = pretty i
+  pretty (VText t) = enclose "\"" "\"" $ pretty t
+  pretty (VBytes b) = fromString $ "h" <> "'" <> BS.unpack (B16.encode b) <> "'"
+  pretty (VBool True) = "true"
+  pretty (VBool False) = "false"
+
+-- * IndexMappable
+
+instance
+  ( IndexMappable XCddl i j
+  , IndexMappable XXTopLevel i j
+  , IndexMappable XXType2 i j
+  , IndexMappable XTerm i j
+  , IndexMappable XRule i j
+  ) =>
+  IndexMappable CDDL i j
+  where
+  mapIndex (CDDL r tls e) = CDDL (mapIndex r) (mapIndex <$> tls) (mapIndex <$> e)
+
+instance
+  ( IndexMappable XXType2 i j
+  , IndexMappable XTerm i j
+  , IndexMappable XRule i j
+  ) =>
+  IndexMappable Rule i j
+  where
+  mapIndex (Rule n mg a t c) = Rule n (mapIndex <$> mg) a (mapIndex t) (mapIndex c)
+
+instance
+  ( IndexMappable XXTopLevel i j
+  , IndexMappable XXType2 i j
+  , IndexMappable XTerm i j
+  , IndexMappable XRule i j
+  ) =>
+  IndexMappable TopLevel i j
+  where
+  mapIndex (TopLevelRule r) = TopLevelRule $ mapIndex r
+  mapIndex (XXTopLevel e) = XXTopLevel $ mapIndex e
+
+instance IndexMappable XTerm i j => IndexMappable GenericParameter i j where
+  mapIndex (GenericParameter n e) = GenericParameter n $ mapIndex e
+
+instance IndexMappable XTerm i j => IndexMappable GenericParameters i j where
+  mapIndex (GenericParameters ns) = GenericParameters $ mapIndex <$> ns
+
+instance
+  ( IndexMappable XXType2 i j
+  , IndexMappable XTerm i j
+  ) =>
+  IndexMappable TypeOrGroup i j
+  where
+  mapIndex (TOGType t) = TOGType $ mapIndex t
+  mapIndex (TOGGroup g) = TOGGroup $ mapIndex g
+
+instance
+  ( IndexMappable XTerm i j
+  , IndexMappable XXType2 i j
+  ) =>
+  IndexMappable GroupEntry i j
+  where
+  mapIndex (GroupEntry mo gev e) = GroupEntry mo (mapIndex gev) (mapIndex e)
+
+instance
+  ( IndexMappable XXType2 i j
+  , IndexMappable XTerm i j
+  ) =>
+  IndexMappable GroupEntryVariant i j
+  where
+  mapIndex (GEType mk t) = GEType (mapIndex <$> mk) $ mapIndex t
+  mapIndex (GERef n ma) = GERef n (mapIndex <$> ma)
+  mapIndex (GEGroup g) = GEGroup (mapIndex g)
+
+instance
+  ( IndexMappable XXType2 i j
+  , IndexMappable XTerm i j
+  ) =>
+  IndexMappable MemberKey i j
+  where
+  mapIndex (MKType t) = MKType $ mapIndex t
+  mapIndex (MKBareword n) = MKBareword n
+  mapIndex (MKValue x) = MKValue x
+
+instance
+  ( IndexMappable XXType2 i j
+  , IndexMappable XTerm i j
+  ) =>
+  IndexMappable Type0 i j
+  where
+  mapIndex (Type0 ts) = Type0 $ mapIndex <$> ts
+
+instance
+  ( IndexMappable XXType2 i j
+  , IndexMappable XTerm i j
+  ) =>
+  IndexMappable Type1 i j
+  where
+  mapIndex (Type1 t mo e) = Type1 (mapIndex t) (second mapIndex <$> mo) (mapIndex e)
+
+instance
+  ( IndexMappable XXType2 i j
+  , IndexMappable XTerm i j
+  ) =>
+  IndexMappable Type2 i j
+  where
+  mapIndex (T2Value v) = T2Value v
+  mapIndex (T2Name n mg) = T2Name n (mapIndex <$> mg)
+  mapIndex (T2Group t) = T2Group $ mapIndex t
+  mapIndex (T2Map g) = T2Map $ mapIndex g
+  mapIndex (T2Array a) = T2Array $ mapIndex a
+  mapIndex (T2Unwrapped n mg) = T2Unwrapped n (mapIndex <$> mg)
+  mapIndex (T2Enum g) = T2Enum $ mapIndex g
+  mapIndex (T2EnumRef n mg) = T2EnumRef n (mapIndex <$> mg)
+  mapIndex (T2Tag mt t) = T2Tag mt $ mapIndex t
+  mapIndex (T2DataItem t mt) = T2DataItem t mt
+  mapIndex T2Any = T2Any
+  mapIndex (XXType2 e) = XXType2 $ mapIndex e
+
+instance
+  ( IndexMappable XXType2 i j
+  , IndexMappable XTerm i j
+  ) =>
+  IndexMappable GenericArg i j
+  where
+  mapIndex (GenericArg g) = GenericArg $ mapIndex <$> g
+
+instance
+  ( IndexMappable XTerm i j
+  , IndexMappable XXType2 i j
+  ) =>
+  IndexMappable Group i j
+  where
+  mapIndex (Group g) = Group $ mapIndex <$> g
+
+instance
+  ( IndexMappable XTerm i j
+  , IndexMappable XXType2 i j
+  ) =>
+  IndexMappable GrpChoice i j
+  where
+  mapIndex (GrpChoice gs e) = GrpChoice (mapIndex <$> gs) $ mapIndex e
+
+mapCDDLDropExt ::
+  ( IndexMappable XXType2 i j
+  , IndexMappable XTerm i j
+  , IndexMappable XRule i j
+  ) =>
+  CDDL i ->
+  CDDL j
+mapCDDLDropExt (CDDL r tls _) = CDDL (mapIndex r) (foldMap mapTopLevelDropExt tls) []
+  where
+    mapTopLevelDropExt (TopLevelRule x) = [TopLevelRule $ mapIndex x]
+    mapTopLevelDropExt (XXTopLevel _) = []

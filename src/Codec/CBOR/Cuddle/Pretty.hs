@@ -9,7 +9,6 @@
 {-# OPTIONS_GHC -Wno-orphans #-}
 
 module Codec.CBOR.Cuddle.Pretty (
-  CommentRender (..),
   PrettyStage,
   XXTopLevel (..),
   XXType2 (..),
@@ -20,10 +19,16 @@ module Codec.CBOR.Cuddle.Pretty (
 ) where
 
 import Codec.CBOR.Cuddle.CDDL
-import Codec.CBOR.Cuddle.CDDL.CTree (CTree, PTerm (..), XXCTree)
-import Codec.CBOR.Cuddle.CDDL.CTree qualified as CT
-import Codec.CBOR.Cuddle.CDDL.CtlOp (CtlOp)
-import Codec.CBOR.Cuddle.Comments (CollectComments (..), Comment, HasComment (..), unComment)
+import Codec.CBOR.Cuddle.CDDL.Phase (HuddleStage)
+import Codec.CBOR.Cuddle.Comments (
+  CollectComments (..),
+  Comment,
+  HasComment (..),
+  prettyCommentNoBreakWS,
+ )
+import Codec.CBOR.Cuddle.Huddle (XCddl (..), XRule (..), XTerm (..), XXTopLevel (..), XXType2 (..))
+import Codec.CBOR.Cuddle.IndexMappable (IndexMappable (..))
+import Codec.CBOR.Cuddle.Parser (ParserStage, XRule (..))
 import Codec.CBOR.Cuddle.Pretty.Columnar (
   Cell (..),
   CellAlign (..),
@@ -37,14 +42,11 @@ import Codec.CBOR.Cuddle.Pretty.Columnar (
   singletonRow,
  )
 import Codec.CBOR.Cuddle.Pretty.Utils (renderedLen, softspace)
-import Data.ByteString.Base16 qualified as B16
-import Data.ByteString.Char8 qualified as BS
 import Data.Default.Class (Default)
 import Data.Foldable (Foldable (..))
 import Data.List.NonEmpty qualified as NE
-import Data.String (IsString, fromString)
+import Data.String (IsString)
 import Data.Text (Text)
-import Data.Text qualified as T
 import Data.Void (Void, absurd)
 import GHC.Generics (Generic)
 import Optics.Core ((^.))
@@ -81,26 +83,6 @@ instance Pretty (CDDL PrettyStage) where
 instance Pretty (TopLevel PrettyStage) where
   pretty (XXTopLevel (PrettyXXTopLevel cmt)) = pretty cmt
   pretty (TopLevelRule x) = pretty x <> hardline
-
-instance Pretty Name where
-  pretty (Name name) = pretty name
-
-data CommentRender
-  = PreComment
-  | PostComment
-
-prettyCommentNoBreak :: Comment -> Doc ann
-prettyCommentNoBreak = align . vsep . toList . fmap (pretty . (";" <>)) . unComment
-
-prettyCommentNoBreakWS :: Comment -> Doc ann
-prettyCommentNoBreakWS cmt
-  | cmt == mempty = mempty
-  | otherwise = space <> prettyCommentNoBreak cmt
-
-instance Pretty Comment where
-  pretty c
-    | c == mempty = mempty
-    | otherwise = prettyCommentNoBreak c <> hardline
 
 type0Def :: Type0 PrettyStage -> Doc ann
 type0Def t = nest 2 $ line' <> pretty t
@@ -144,9 +126,6 @@ instance Pretty (Type0 PrettyStage) where
             Just (to, t2') -> Cell (pretty t2 <+> pretty to <+> pretty t2') LeftAlign
          in
           Row [valCell, Cell (prettyCommentNoBreakWS cmt) LeftAlign]
-
-instance Pretty CtlOp where
-  pretty = pretty . T.toLower . T.pack . show
 
 instance Pretty TyOp where
   pretty (RangeOp ClOpen) = "..."
@@ -247,60 +226,43 @@ instance Pretty (MemberKey PrettyStage) where
   pretty (MKBareword n) = pretty n
   pretty (MKValue v) = pretty v
 
-instance Pretty Value where
-  pretty (Value v cmt) = pretty v <> prettyCommentNoBreakWS cmt
-
-instance Pretty ValueVariant where
-  pretty (VUInt i) = pretty i
-  pretty (VNInt i) = "-" <> pretty i
-  pretty (VBignum i) = pretty i
-  pretty (VFloat16 i) = pretty i
-  pretty (VFloat32 i) = pretty i
-  pretty (VFloat64 i) = pretty i
-  pretty (VText t) = enclose "\"" "\"" $ pretty t
-  pretty (VBytes b) = fromString $ "h" <> "'" <> BS.unpack (B16.encode b) <> "'"
-  pretty (VBool True) = "true"
-  pretty (VBool False) = "false"
-
-instance Pretty PTerm where
-  pretty = \case
-    PTBool -> "bool"
-    PTUInt -> "uint"
-    PTNInt -> "nint"
-    PTInt -> "int"
-    PTHalf -> "half"
-    PTFloat -> "float"
-    PTDouble -> "double"
-    PTBytes -> "bytes"
-    PTText -> "text"
-    PTAny -> "any"
-    PTNil -> "nil"
-    PTUndefined -> "undefined"
-
 -- | Render a pretty-stage CDDL to 'Text', removing trailing whitespace.
 renderCDDL :: LayoutOptions -> CDDL PrettyStage -> Text
 renderCDDL opts =
   PT.renderStrict . removeTrailingWhitespace . layoutPretty opts . pretty
 
-instance Pretty (XXCTree p) => Pretty (CTree p) where
-  pretty = \case
-    CT.Literal v -> pretty v
-    CT.Postlude v -> pretty v
-    CT.Range lo hi ClOpen -> pretty lo <+> "..." <+> pretty hi
-    CT.Range lo hi Closed -> pretty lo <+> ".." <+> pretty hi
-    CT.KV k v _ -> pretty k <+> "==>" <+> pretty v
-    CT.CTreeE x -> pretty x
-    CT.Occur v oi ->
-      case oi of
-        OIOptional -> "?" <+> pretty v
-        OIZeroOrMore -> "*" <+> pretty v
-        OIOneOrMore -> "+" <+> pretty v
-        OIBounded lo hi -> foldMap pretty lo <> "*" <> foldMap pretty hi <+> pretty v
-    CT.Map m -> encloseSep "{" "}" "," $ pretty <$> m
-    CT.Array e -> list $ pretty <$> e
-    CT.Choice c -> group . vsep . punctuate "//" $ pretty <$> toList c
-    CT.Group g -> tupled $ pretty <$> g
-    CT.Control op tgt ctl -> pretty tgt <+> pretty op <+> pretty ctl
-    CT.Enum e -> "&" <> pretty e
-    CT.Unwrap x -> "~" <> pretty x
-    CT.Tag t x -> "#6." <> pretty t <> "(" <> pretty x <> ")"
+-- * IndexMappable
+
+-- ParserStage ~ PrettyStage
+
+instance IndexMappable XCddl ParserStage PrettyStage where
+  mapIndex (ParserXCddl c) = PrettyXCddl c
+
+instance IndexMappable XTerm ParserStage PrettyStage where
+  mapIndex (ParserXTerm c) = PrettyXTerm c
+
+instance IndexMappable XRule ParserStage PrettyStage where
+  mapIndex (ParserXRule c) = PrettyXRule c
+
+instance IndexMappable XXType2 ParserStage PrettyStage where
+  mapIndex (ParserXXType2 v) = absurd v
+
+instance IndexMappable XXTopLevel ParserStage PrettyStage where
+  mapIndex (ParserXXTopLevel c) = PrettyXXTopLevel c
+
+-- HuddleStage -> PrettyStage
+
+instance IndexMappable XCddl HuddleStage PrettyStage where
+  mapIndex (HuddleXCddl c) = PrettyXCddl c
+
+instance IndexMappable XXTopLevel HuddleStage PrettyStage where
+  mapIndex (HuddleXXTopLevel c) = PrettyXXTopLevel c
+
+instance IndexMappable XXType2 HuddleStage PrettyStage where
+  mapIndex (HuddleXXType2 c) = absurd c
+
+instance IndexMappable XTerm HuddleStage PrettyStage where
+  mapIndex (HuddleXTerm c) = PrettyXTerm c
+
+instance IndexMappable XRule HuddleStage PrettyStage where
+  mapIndex (HuddleXRule c _ _) = PrettyXRule c
