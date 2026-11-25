@@ -27,24 +27,27 @@ import Codec.CBOR.Cuddle.CDDL.Custom.Validator (
   ValidationTrace (..),
   Validator,
   ValidatorPhase,
+  ValidatorT,
   XXCTree (..),
   accept,
-  compareEvidencedProgress,
   controlVerdict,
+  element,
   evidence,
   failWith,
   mapTrace,
   measureProgress,
-  pickBranch,
   reject,
   runValidator,
+  withArray,
+  withChoice,
   withTag,
  )
 import Codec.CBOR.Cuddle.CDDL.Phase (showSimple)
 import Codec.CBOR.Cuddle.IndexMappable (IndexMappable (..))
 import Codec.CBOR.Read
 import Codec.CBOR.Term
-import Data.Bifunctor (Bifunctor (..))
+import Control.Applicative (Alternative (..), optional)
+import Control.Monad (void)
 import Data.Bits hiding (And)
 import Data.ByteString qualified as BS
 import Data.ByteString.Lazy qualified as BSL
@@ -52,7 +55,6 @@ import Data.Foldable (Foldable (..), asum)
 import Data.Function (on)
 import Data.IntSet qualified as IS
 import Data.List (maximumBy)
-import Data.List.NonEmpty (NonEmpty (..))
 import Data.List.NonEmpty qualified as NE
 import Data.Map.Strict qualified as Map
 import Data.Maybe
@@ -64,7 +66,7 @@ import Data.Text.Lazy qualified as TL
 import Data.Word
 import GHC.Float
 import GHC.Stack (HasCallStack)
-import Text.Regex.TDFA
+import Text.Regex.TDFA ((=~))
 
 data ValidateCBORError
   = DecodingFailed DeserialiseFailure
@@ -85,7 +87,7 @@ validateCBOR bs ruleName cddl@(CTreeRoot tree) =
     Left e -> Left $ DecodingFailed e
     Right (rest, term)
       | BSL.null rest -> case tree Map.!? ruleName of
-          Just rule -> Right $ runValidator (ValidateEnv cddl mempty) $ validateTerm term rule
+          Just rule -> Right $ runValidator (validateTerm term rule) $ ValidateEnv cddl mempty
           Nothing -> Left $ RuleDoesNotExist ruleName
       | otherwise -> Left $ LeftoverBytes rest
 
@@ -797,82 +799,59 @@ validateList terms (CTreeE (VValidator v _)) = v $ SingleTerm $ TList terms
 validateList terms rule =
   case rule of
     Postlude PTAny -> accept rule
-    Array rules -> mapTrace ListTrace . fst $ validate finalize [] terms rules
-      where
-        finalize _ [] = evidence ListValidationDone
-        finalize skipped (x : xs) =
-          let leftovers = x :| xs
-              unwrapOccur (Occur ct _) = ct
-              unwrapOccur ct = ct
-              attempts =
-                [ (mapIndex r, trc)
-                | r <- skipped
-                , Evidenced SInvalid trc <- [validateTerm cddl x (unwrapOccur r)]
-                , measureProgress trc > mempty
-                ]
-              bestAttempt = case attempts of
-                [] -> Nothing
-                _ -> Just $ maximumBy (compare `on` (measureProgress . snd)) attempts
-           in evidence $ ListValidationLeftoverTerms leftovers bestAttempt
-    Choice opts -> validateChoice (validateList cddl terms) opts
+    Array rules -> withArray $ do
+      res <- matchSeq rules terms
+      case res of
+        [] -> pure ()
+        (t : ts) -> failWith $ ArrayLeftoverTerms (t NE.:| ts) _
+    Choice opts -> validateChoice (validateList terms) opts
     _ -> reject rule
   where
-    validate ::
-      ([CTree ValidatorPhase] -> [Term] -> Evidenced (ValidationTrace ListBlock)) ->
-      [CTree ValidatorPhase] ->
-      [Term] ->
-      [CTree ValidatorPhase] ->
-      (Evidenced (ValidationTrace ListBlock), [Term])
-    validate f skipped tss [] = (f skipped tss, tss)
-    validate f skipped [] (r : rs)
-      | isOptional r = validate f skipped [] rs
-      | otherwise = (evidence . ListValidationUnappliedRule $ mapIndex r, [])
-    validate f skipped tss@(t : ts) (r : rs) =
-      let
-        orElse x@(Evidenced SValid _, _) _ = x
-        orElse x@(ex, _) y@(ey, _) =
-          case compareEvidencedProgress ex ey of
-            GT -> x
-            _ -> y
+    matchSingle :: CTree ValidatorPhase -> [Term] -> ValidatorT ListBlock [Term]
+    matchSingle r [] = failWith $ ArrayLeftoverRule $ mapIndex r
+    matchSingle r (t : ts) = do
+      element $ validateTerm t r
+      pure ts
 
-        consumeTerm ct g = case validateTerm cddl t ct of
-          Evidenced SValid trc -> first (mapTrace $ ListValidationConsume (mapIndex r) trc) $ g ts
-          Evidenced SInvalid trc -> (evidence $ ListValidationMissingRequired (mapIndex ct) trc, tss)
+    -- low inclusive, high exclusive
+    matchBounded ::
+      Word64 -> Maybe Word64 -> CTree ValidatorPhase -> [Term] -> ValidatorT ListBlock [Term]
+    matchBounded lo mHi r ts
+      | withinBounds && canConsumeMore = do
+          res <- optional $ matchSingle r ts
+          case res of
+            Just remainingTerms -> matchBounded newLo newHi r remainingTerms
+            Nothing -> pure ts
+      | withinBounds = pure ts
+      | belowBounds = do
+          remainingTerms <- matchSingle r ts
+          matchBounded newLo newHi r remainingTerms
+      | otherwise = error "Invalid bounds"
+      where
+        withinBounds = lo == 0 && maybe True (> 0) mHi
+        canConsumeMore = maybe True (> 1) mHi
+        belowBounds = lo > 0
 
-        consumeGroup ns gp g = case validate (\_ _ -> evidence ListValidationDone) [] tss gp of
-          (Evidenced SValid trc, leftover) -> first (mapTrace $ ListValidationConsumeGroup (reverse ns) trc) $ g leftover
-          (Evidenced SInvalid trc, leftover) -> (evidence $ ListValidationBadGroup (reverse ns) trc, leftover)
+        safePred :: Word64 -> Word64
+        safePred 0 = 0
+        safePred x = pred x
 
-        consume ct@(CTreeE (VRuleRef n)) g = go n []
-          where
-            go name ns =
-              case dereference cddl name of
-                Group gp -> consumeGroup (name : ns) gp g
-                CTreeE (VRuleRef newName) -> go newName (name : ns)
-                _ -> consumeTerm ct g
-        consume (Group gp) g = consumeGroup [] gp g
-        consume (KV _ v _) g = consume v g
-        consume ct g = consumeTerm ct g
-        continue l = validate f skipped l rs
-        skipRule = validate f (r : skipped) tss rs
-        rewriteRule newRule l = validate f skipped l (newRule : rs)
-        validateRule =
-          \case
-            Occur ct oi -> case oi of
-              OIOptional -> consume ct continue `orElse` skipRule
-              OIZeroOrMore -> consume ct (rewriteRule r) `orElse` skipRule
-              OIOneOrMore -> consume ct (rewriteRule (Occur ct OIZeroOrMore))
-              OIBounded lb ub ->
-                let bounds = (lb, ub)
-                 in case boundPlacement 1 bounds Closed of
-                      BelowBounds -> consume ct (rewriteRule (Occur ct $ decrementBounds bounds))
-                      WithinBounds -> consume ct (rewriteRule (Occur ct $ decrementBounds bounds)) `orElse` skipRule
-                      AboveBounds
-                        | boundPlacement 0 (lb, ub) Closed == WithinBounds -> skipRule
-                        | otherwise -> error "Negative upper bound"
-            _ -> consume r continue
-       in
-        validateRule r
+        newLo = safePred lo
+        newHi = safePred <$> mHi
+
+    matchSeq :: [CTree ValidatorPhase] -> [Term] -> ValidatorT ListBlock [Term]
+    matchSeq [] ts = pure ts
+    matchSeq (r : rs) ts = case r of
+      Occur ct oi -> do
+        remainingTerms <- case oi of
+          OIOptional -> matchBounded 0 (Just 1) ct ts
+          OIBounded lb ub -> matchBounded (fromMaybe 0 lb) ub ct ts
+          OIZeroOrMore -> matchBounded 0 Nothing ct ts
+          OIOneOrMore -> matchBounded 1 Nothing ct ts
+        matchSeq rs remainingTerms
+      _ -> do
+        remainingTerms <- matchSingle r ts
+        matchSeq rs remainingTerms
 
 --------------------------------------------------------------------------------
 -- Maps
@@ -882,9 +861,8 @@ validateMap ::
   [(Term, Term)] ->
   CTree ValidatorPhase ->
   Validator ()
-validateMap terms (CTreeE (VRuleRef n)) =
-  dereferenceAndValidate cddl n $ validateMap cddl terms
-validateMap terms (CTreeE (VValidator v _)) = runValidator (v $ SingleTerm $ TMap terms) cddl
+validateMap terms (CTreeE (VRuleRef n)) = validateMap terms =<< dereference n
+validateMap terms (CTreeE (VValidator v _)) = v $ SingleTerm $ TMap terms
 validateMap terms rule =
   case rule of
     Postlude PTAny -> terminal rule
@@ -970,7 +948,7 @@ validateChoice ::
   Validator ()
 validateChoice f rs = asum $ zipWith g [0 ..] (toList rs)
   where
-    g i r = pickBranch i $ f r
+    g i = withChoice i . f
 
 --------------------------------------------------------------------------------
 -- Bits control

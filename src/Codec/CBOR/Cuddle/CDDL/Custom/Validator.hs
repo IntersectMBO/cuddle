@@ -10,6 +10,7 @@ module Codec.CBOR.Cuddle.CDDL.Custom.Validator (
   TermValidator,
   ValidatorPhase,
   Validator,
+  ValidatorT,
   XXCTree (..),
   HasValidator (..),
   ValidateEnv (..),
@@ -25,9 +26,11 @@ module Codec.CBOR.Cuddle.CDDL.Custom.Validator (
   accept,
   reject,
   failWith,
-  pickBranch,
+  withChoice,
   withTag,
+  withArray,
   controlVerdict,
+  element,
 
   -- * Trace
   SValidity (..),
@@ -56,7 +59,7 @@ import Codec.CBOR.Term (Term)
 import Control.Applicative (Alternative (..))
 import Control.Monad.Except (ExceptT, MonadError (..), runExceptT, tryError)
 import Control.Monad.Reader (MonadReader (..), ReaderT (..), asks)
-import Control.Monad.State.Strict (MonadState (..), State, modify, runState)
+import Control.Monad.State.Strict (MonadState (..), State, modify', runState)
 import Data.Foldable (Foldable (..))
 import Data.Function (on)
 import Data.Kind (Type)
@@ -121,7 +124,7 @@ instance MonadCddl Validator where
 instance MonadFail Validator where
   fail msg = failWith $ CustomFailure $ T.pack msg
 
-instance Alternative Validator where
+instance Alternative (ValidatorT b) where
   Validator x <|> Validator y = Validator $ do
     initialSt <- get
     xRes <- tryError x
@@ -149,7 +152,7 @@ closeSteps :: [ValidationTrace b IsValid] -> StepTrace b v -> StepTrace b v
 closeSteps steps cap = foldl' (flip Step) cap steps
 
 pushStep :: ValidationTrace b IsValid -> ValidatorT b ()
-pushStep step = Validator $ modify (step :)
+pushStep step = Validator $ modify' (step :)
 
 accept :: CTree ValidatorPhase -> Validator ()
 accept = pushStep . TerminalRule . mapIndex
@@ -157,16 +160,31 @@ accept = pushStep . TerminalRule . mapIndex
 reject :: CTree ValidatorPhase -> Validator ()
 reject = failWith . UnapplicableRule . mapIndex
 
+failWith :: ValidationTrace b IsInvalid -> ValidatorT b a
+failWith err = Validator $ throwError err
+
 failWithSteps :: StepTrace b IsInvalid -> ValidatorT b a
 failWithSteps = \case
   Step t rest -> pushStep t >> failWithSteps rest
   StepFailed e -> failWith e
 
-pickBranch :: Int -> Validator () -> Validator ()
-pickBranch i = wrapBlock $ ChoiceBranch i
+withChoice :: Int -> Validator () -> Validator ()
+withChoice i m =
+  runBlock m >>= \case
+    Right (_, trc) -> pushStep $ ChoiceBranch i trc
+    Left trc -> failWithSteps trc
 
 withTag :: Word64 -> Validator () -> Validator ()
 withTag t = wrapBlock $ TagTrace t
+
+withArray :: ValidatorT ListBlock () -> Validator ()
+withArray = wrapBlock ArrayTrace
+
+element :: Validator () -> ValidatorT ListBlock ()
+element m =
+  runBlock m >>= \case
+    Right (_, trc) -> pushStep $ ArrayElement trc
+    Left trc -> failWith $ ArrayMissingRequired trc
 
 controlVerdict :: CtlOp -> CTree ValidatorPhase -> Bool -> Validator ()
 controlVerdict op ctrl = \case
@@ -175,23 +193,25 @@ controlVerdict op ctrl = \case
   where
     info = ControlInfo op $ mapIndex ctrl
 
-failWith :: ValidationTrace b IsInvalid -> ValidatorT b a
-failWith err = Validator $ throwError err
-
-checkEvidence :: ValidatorT b () -> ValidatorT b (Evidenced (StepTrace b))
-checkEvidence v = do
-  env <- ask
-  pure $ runValidator env v
-
 wrapBlock ::
-  (StepTrace b IsValid -> ValidationTrace b IsValid) ->
-  ValidatorT b () ->
-  ValidatorT b ()
-wrapBlock f v = do
-  ev <- checkEvidence v
-  case ev of
-    Evidenced SValid trc -> pushStep $ f trc
-    Evidenced SInvalid trc -> failWithSteps trc
+  (forall v. StepTrace b' v -> ValidationTrace b v) ->
+  ValidatorT b' a ->
+  ValidatorT b a
+wrapBlock r m =
+  runBlock m >>= \case
+    Right (x, steps) -> pushStep (r steps) >> pure x
+    Left steps -> failWith $ r steps
+
+runBlockWith ::
+  ValidatorT b' a -> ValidateEnv -> Either (StepTrace b' IsInvalid) (a, StepTrace b' IsValid)
+runBlockWith (Validator m) env = case runState (runExceptT $ runReaderT m env) [] of
+  (Right x, trc) -> Right (x, closeSteps trc StepsDone)
+  (Left err, trc) -> Left $ closeSteps trc $ StepFailed err
+
+runBlock ::
+  ValidatorT b' a ->
+  ValidatorT b (Either (StepTrace b' IsInvalid) (a, StepTrace b' IsValid))
+runBlock m = asks $ runBlockWith m
 
 -- | Run an action with the given local generic bindings installed.
 withLocalValidateBindings ::
@@ -199,13 +219,13 @@ withLocalValidateBindings ::
 withLocalValidateBindings binds =
   local (\env -> env {veLocal = binds `Map.union` veLocal env})
 
-runValidator :: ValidateEnv -> ValidatorT b a -> Evidenced (StepTrace b)
-runValidator env (Validator m) = mkStepTrace $ runState (runExceptT $ runReaderT m env) []
+runValidator :: ValidatorT b a -> ValidateEnv -> Evidenced (StepTrace b)
+runValidator m env = mkStepTrace $ runBlockWith m env
   where
-    mkStepTrace (eFail, st) =
+    mkStepTrace eFail =
       case eFail of
-        Right _ -> evidence $ closeSteps st StepsDone
-        Left err -> evidence $ closeSteps st (StepFailed err)
+        Right (_, trc) -> evidence trc
+        Left trc -> evidence trc
 
 type data Validity
   = IsValid
@@ -341,7 +361,6 @@ data ValidationTrace (b :: Block) (v :: Validity) where
   InvalidTag :: Word64 -> Word64 -> ValidationTrace TermBlock IsInvalid
   ArrayTrace :: StepTrace ListBlock v -> ValidationTrace TermBlock v
   ArrayElement ::
-    CTree MonoSimplePhase ->
     StepTrace TermBlock IsValid ->
     ValidationTrace ListBlock IsValid
   ArrayLeftoverTerms ::
@@ -352,7 +371,6 @@ data ValidationTrace (b :: Block) (v :: Validity) where
     CTree MonoSimplePhase ->
     ValidationTrace ListBlock IsInvalid
   ArrayMissingRequired ::
-    CTree MonoSimplePhase ->
     StepTrace TermBlock IsInvalid ->
     ValidationTrace ListBlock IsInvalid
   ArrayConsumeGroup ::
@@ -543,8 +561,8 @@ prettyValidationTrace opts = \case
         [ annotate (color Red) "required rule not satisfied:"
         , pretty r
         ]
-  ArrayElement _ steps -> vsep [prettyStepTrace True opts steps]
-  ArrayMissingRequired _ t ->
+  ArrayElement steps -> vsep [prettyStepTrace True opts steps]
+  ArrayMissingRequired t ->
     vsep
       [ annotate (color Red) "failed to apply required rule:"
       , nestContainer $ prettyStepTrace True opts t
