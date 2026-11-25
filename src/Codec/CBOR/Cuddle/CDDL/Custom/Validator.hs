@@ -23,6 +23,11 @@ module Codec.CBOR.Cuddle.CDDL.Custom.Validator (
   defaultTraceOptions,
   showValidationTrace,
   accept,
+  reject,
+  failWith,
+  pickBranch,
+  withTag,
+  controlVerdict,
 
   -- * Trace
   SValidity (..),
@@ -31,6 +36,8 @@ module Codec.CBOR.Cuddle.CDDL.Custom.Validator (
   Evidenced (..),
   ControlInfo (..),
   ValidationTrace (..),
+  StepTrace (..),
+  Block (..),
   evidence,
   fromEither,
   foldEvidenced,
@@ -141,11 +148,50 @@ instance Alternative Validator where
 closeSteps :: [ValidationTrace b IsValid] -> StepTrace b v -> StepTrace b v
 closeSteps steps cap = foldl' (flip Step) cap steps
 
+pushStep :: ValidationTrace b IsValid -> ValidatorT b ()
+pushStep step = Validator $ modify (step :)
+
 accept :: CTree ValidatorPhase -> Validator ()
-accept rule = Validator $ modify (TerminalRule (mapIndex rule) :)
+accept = pushStep . TerminalRule . mapIndex
+
+reject :: CTree ValidatorPhase -> Validator ()
+reject = failWith . UnapplicableRule . mapIndex
+
+failWithSteps :: StepTrace b IsInvalid -> ValidatorT b a
+failWithSteps = \case
+  Step t rest -> pushStep t >> failWithSteps rest
+  StepFailed e -> failWith e
+
+pickBranch :: Int -> Validator () -> Validator ()
+pickBranch i = wrapBlock $ ChoiceBranch i
+
+withTag :: Word64 -> Validator () -> Validator ()
+withTag t = wrapBlock $ TagTrace t
+
+controlVerdict :: CtlOp -> CTree ValidatorPhase -> Bool -> Validator ()
+controlVerdict op ctrl = \case
+  True -> pushStep $ ControlTrace info SValid
+  False -> failWith $ ControlTrace info SInvalid
+  where
+    info = ControlInfo op $ mapIndex ctrl
 
 failWith :: ValidationTrace b IsInvalid -> ValidatorT b a
 failWith err = Validator $ throwError err
+
+checkEvidence :: ValidatorT b () -> ValidatorT b (Evidenced (StepTrace b))
+checkEvidence v = do
+  env <- ask
+  pure $ runValidator env v
+
+wrapBlock ::
+  (StepTrace b IsValid -> ValidationTrace b IsValid) ->
+  ValidatorT b () ->
+  ValidatorT b ()
+wrapBlock f v = do
+  ev <- checkEvidence v
+  case ev of
+    Evidenced SValid trc -> pushStep $ f trc
+    Evidenced SInvalid trc -> failWithSteps trc
 
 -- | Run an action with the given local generic bindings installed.
 withLocalValidateBindings ::
@@ -285,8 +331,7 @@ data ValidationTrace (b :: Block) (v :: Validity) where
   AlternativeFail :: ValidationTrace b IsInvalid
   UnapplicableRule :: CTree MonoSimplePhase -> ValidationTrace TermBlock IsInvalid
   TerminalRule :: CTree MonoSimplePhase -> ValidationTrace TermBlock IsValid
-  ControlTrace ::
-    ControlInfo -> ValidationTrace TermBlock IsValid -> ValidationTrace TermBlock IsValid
+  ControlTrace :: ControlInfo -> SValidity v -> ValidationTrace TermBlock v
   ReferenceRule :: Name -> StepTrace TermBlock v -> ValidationTrace TermBlock v
   CustomSuccess :: ValidationTrace TermBlock IsValid
   CustomFailure :: Text -> ValidationTrace b IsInvalid
@@ -341,7 +386,7 @@ deriving instance Show (ValidationTrace b v)
 instance IsValidationTrace (ValidationTrace b) where
   traceValidity = \case
     TerminalRule {} -> SValid
-    ControlTrace {} -> SValid
+    ControlTrace _ v -> v
     AlternativeFail -> SInvalid
     UnapplicableRule {} -> SInvalid
     ReferenceRule _ x -> traceValidity x
@@ -366,7 +411,8 @@ instance IsValidationTrace (ValidationTrace b) where
 
   measureProgress = \case
     TerminalRule {} -> Progress 1 0
-    ControlTrace _ x -> measureProgress x
+    ControlTrace _ SValid -> Progress 0 1
+    ControlTrace _ SInvalid -> mempty
     AlternativeFail -> mempty
     UnapplicableRule {} -> mempty
     ReferenceRule _ x -> increaseRefProgress $ measureProgress x
@@ -438,11 +484,15 @@ prettyValidationTrace opts = \case
   TerminalRule x -> "app: " <> annotate (color Green) (pretty x)
   AlternativeFail -> mempty
   UnapplicableRule x -> annotate (color Red) $ vsep ["failed to apply: ", indent 2 $ pretty x]
-  ControlTrace ci x ->
-    vsep
-      [ prettyValidationTrace opts x
-      , nestContainer $ "ctrl:" <+> annotate (color Yellow) ("." <> pretty ci)
-      ]
+  ControlTrace ci v ->
+    let col = case v of
+          SValid -> Green
+          SInvalid -> Red
+     in vsep
+          [ "ctrl:" <+> annotate (color col) ("." <> pretty ci) <+> case v of
+              SValid -> mempty
+              SInvalid -> "(failed)"
+          ]
   ChoiceBranch i c ->
     vsep
       [ "choice (idx: " <> pretty i <> ")"
@@ -561,3 +611,6 @@ instance IndexMappable CTree ValidatorPhase MonoSimplePhase where
     where
       mapExt (VRuleRef n) = CTreeE $ MSimpleRef n
       mapExt (VValidator _ x) = mapIndex x
+
+instance IndexMappable CTreeRoot ValidatorPhase MonoSimplePhase where
+  mapIndex (CTreeRoot m) = CTreeRoot $ mapIndex <$> m
