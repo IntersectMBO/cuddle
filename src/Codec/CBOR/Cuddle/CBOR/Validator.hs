@@ -37,6 +37,7 @@ import Codec.CBOR.Cuddle.CDDL.Custom.Validator (
   mapTrace,
   measureProgress,
   reject,
+  runBlock,
   runValidator,
   withArray,
   withChoice,
@@ -803,15 +804,47 @@ validateList terms rule =
       res <- matchSeq rules terms
       case res of
         [] -> pure ()
-        (t : ts) -> failWith $ ArrayLeftoverTerms (t NE.:| ts) _
+        (t : ts) -> do
+          closest <- closestMatch t
+          failWith $ ArrayLeftoverTerms (t NE.:| ts) closest
+      where
+        candidates = reverse [r | r@Occur {} <- rules]
+
+        unwrapOccur (Occur ct _) = ct
+        unwrapOccur ct = ct
+
+        tryCandidate t r = do
+          res <- runBlock . validateTerm t $ unwrapOccur r
+          pure (mapIndex r, res)
+
+        closestMatch t = do
+          results <- traverse (tryCandidate t) candidates
+          let
+            attempts =
+              [ (r, trc)
+              | (r, Left trc) <- results
+              , measureProgress trc > mempty
+              ]
+          pure $ case attempts of
+            [] -> Nothing
+            _ -> Just $ maximumBy (compare `on` (measureProgress . snd)) attempts
     Choice opts -> validateChoice (validateList terms) opts
     _ -> reject rule
   where
     matchSingle :: CTree ValidatorPhase -> [Term] -> ValidatorT ListBlock [Term]
     matchSingle r [] = failWith $ ArrayLeftoverRule $ mapIndex r
-    matchSingle r (t : ts) = do
-      element $ validateTerm t r
-      pure ts
+    matchSingle r (t : ts) = case r of
+      CTreeE (VRuleRef n) -> do
+        ref <- dereference n
+        matchSingle ref (t : ts)
+      CTreeE (VValidator v _) -> do
+        element $ v $ SingleTerm t
+        pure ts
+      KV _ v _ -> matchSingle v (t : ts)
+      Group rs -> matchSeq rs (t : ts)
+      _ -> do
+        element $ validateTerm t r
+        pure ts
 
     -- low inclusive, high exclusive
     matchBounded ::
@@ -823,14 +856,12 @@ validateList terms rule =
             Just remainingTerms -> matchBounded newLo newHi r remainingTerms
             Nothing -> pure ts
       | withinBounds = pure ts
-      | belowBounds = do
+      | otherwise = do
           remainingTerms <- matchSingle r ts
           matchBounded newLo newHi r remainingTerms
-      | otherwise = error "Invalid bounds"
       where
-        withinBounds = lo == 0 && maybe True (> 0) mHi
-        canConsumeMore = maybe True (> 1) mHi
-        belowBounds = lo > 0
+        withinBounds = lo == 0
+        canConsumeMore = maybe True (> 0) mHi
 
         safePred :: Word64 -> Word64
         safePred 0 = 0
@@ -998,7 +1029,7 @@ getIndicesOfEnum g =
     Group g' -> getIndicesOfChoice (fromJust $ NE.nonEmpty g')
     somethingElse -> error $ "Malformed enum in .bits: " <> showSimple somethingElse
 
-dereference :: Name -> Validator (CTree ValidatorPhase)
+dereference :: Name -> ValidatorT b (CTree ValidatorPhase)
 dereference n@(Name s) = do
   mRes <- lookupCddl n
   case mRes of

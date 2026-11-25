@@ -31,6 +31,7 @@ module Codec.CBOR.Cuddle.CDDL.Custom.Validator (
   withArray,
   controlVerdict,
   element,
+  runBlock,
 
   -- * Trace
   SValidity (..),
@@ -110,8 +111,8 @@ type Validator = ValidatorT TermBlock
 
 type TermValidator = RuleTerm -> Validator ()
 
-instance MonadCddl Validator where
-  type Phase Validator = ValidatorPhase
+instance MonadCddl (ValidatorT b) where
+  type Phase (ValidatorT b) = ValidatorPhase
 
   lookupCddl n = do
     CTreeRoot root <- asks veRoot
