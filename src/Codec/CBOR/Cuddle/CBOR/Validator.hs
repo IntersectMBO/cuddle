@@ -98,7 +98,7 @@ validateTerm ::
   CTree ValidatorPhase ->
   Validator ()
 validateTerm term rule
-  | CTreeE (VRuleRef n) <- rule = validateTerm term =<< dereference n
+  | CTreeE (VRuleRef n) <- rule = dereference n $ validateTerm term
   | CTreeE (VValidator validator _) <- rule = validator $ SingleTerm term
   | otherwise =
       case term of
@@ -141,7 +141,7 @@ validateInteger ::
   Validator ()
 validateInteger i rule =
   case rule of
-    CTreeE (VRuleRef n) -> validateInteger i =<< dereference n
+    CTreeE (VRuleRef n) -> dereference n $ validateInteger i
     CTreeE (VValidator validator _) -> validator $ SingleTerm $ TInteger i
     -- echo "C24101" | xxd -r -p - example.cbor
     -- echo "foo = int" > a.cddl
@@ -201,17 +201,15 @@ validateInteger i rule =
         (Literal (Value (VNInt (fromIntegral -> n)) _), Literal (Value (VBignum m) _))
           | (-n) <= i && range bound i m -> accept rule
           | otherwise -> reject rule
-        (CTreeE (VRuleRef n), _) -> do
-          lo <- dereference n
-          validateInteger i (Range lo high bound)
+        (CTreeE (VRuleRef n), _) ->
+          dereference n $ \lo -> validateInteger i (Range lo high bound)
         (_, CTreeE (VRuleRef n)) -> do
-          hi <- dereference n
-          validateInteger i (Range low hi bound)
+          dereference n $ \hi -> validateInteger i (Range low hi bound)
         (lo, hi) -> error $ "Unable to validate range: (" <> showSimple lo <> ", " <> showSimple hi <> ")"
     -- a = &(x, y, z)
     Enum g ->
       case g of
-        CTreeE (VRuleRef n) -> validateInteger i =<< dereference n
+        CTreeE (VRuleRef n) -> dereference n $ validateInteger i
         Group g' -> validateInteger i (Choice (NE.fromList g'))
         _ -> error "Not yet implemented"
     -- a = x: y
@@ -223,7 +221,7 @@ validateInteger i rule =
     _ -> reject rule
   where
     validateBigInt x = case x of
-      CTreeE (VRuleRef n) -> validateBigInt =<< dereference n
+      CTreeE (VRuleRef n) -> dereference n validateBigInt
       Postlude PTBytes -> accept rule
       Control op tgt@(Postlude PTBytes) ctrl ->
         validateBytes bs tgt >> controlBytes bs op ctrl
@@ -240,7 +238,7 @@ controlInteger ::
   CtlOp ->
   CTree ValidatorPhase ->
   Validator ()
-controlInteger i op (CTreeE (VRuleRef n)) = controlInteger i op =<< dereference n
+controlInteger i op (CTreeE (VRuleRef n)) = dereference n $ controlInteger i op
 controlInteger i op ctrl = case op of
   Size -> case ctrl of
     Literal (Value (VUInt sz) _) -> verdict $ 0 <= i && i < 256 ^ sz
@@ -305,7 +303,7 @@ validateHalf ::
   Float ->
   CTree ValidatorPhase ->
   Validator ()
-validateHalf f (CTreeE (VRuleRef n)) = validateHalf f =<< dereference n
+validateHalf f (CTreeE (VRuleRef n)) = dereference n $ validateHalf f
 validateHalf f (CTreeE (VValidator v _)) = v $ SingleTerm $ THalf f
 validateHalf f rule =
   case rule of
@@ -321,11 +319,9 @@ validateHalf f rule =
     Control op tgt ctrl -> validateHalf f tgt >> controlHalf f op ctrl
     -- a = x..y
     Range (CTreeE (VRuleRef n)) high bound -> do
-      lo <- dereference n
-      validateHalf f $ Range lo high bound
+      dereference n $ \lo -> validateHalf f $ Range lo high bound
     Range low (CTreeE (VRuleRef n)) bound -> do
-      hi <- dereference n
-      validateHalf f $ Range low hi bound
+      dereference n $ \hi -> validateHalf f $ Range low hi bound
     Range (Literal (Value (VFloat16 n) _)) (Literal (Value (VFloat16 m) _)) bound
       | n <= f && range bound f m -> accept rule
     _ -> reject rule
@@ -337,8 +333,7 @@ controlHalf ::
   CtlOp ->
   CTree ValidatorPhase ->
   Validator ()
-controlHalf f op (CTreeE (VRuleRef n)) =
-  controlHalf f op =<< dereference n
+controlHalf f op (CTreeE (VRuleRef n)) = dereference n $ controlHalf f op
 controlHalf f op ctrl = case op of
   Eq -> case ctrl of
     Literal (Value (VFloat16 f') _) -> verdict $ f == f'
@@ -356,8 +351,7 @@ validateFloat ::
   Float ->
   CTree ValidatorPhase ->
   Validator ()
-validateFloat f (CTreeE (VRuleRef n)) =
-  validateFloat f =<< dereference n
+validateFloat f (CTreeE (VRuleRef n)) = dereference n $ validateFloat f
 validateFloat f (CTreeE (VValidator v _)) = v $ SingleTerm $ TFloat f
 validateFloat f rule =
   case rule of
@@ -374,12 +368,10 @@ validateFloat f rule =
     Control op tgt ctrl -> validateFloat f tgt >> controlFloat f op ctrl
     -- a = x..y
     -- TODO it is unclear if this should mix floating point types too
-    Range (CTreeE (VRuleRef n)) high bound -> do
-      lo <- dereference n
-      validateFloat f $ Range lo high bound
-    Range low (CTreeE (VRuleRef n)) bound -> do
-      hi <- dereference n
-      validateFloat f $ Range low hi bound
+    Range (CTreeE (VRuleRef n)) high bound ->
+      dereference n $ \lo -> validateFloat f $ Range lo high bound
+    Range low (CTreeE (VRuleRef n)) bound ->
+      dereference n $ \hi -> validateFloat f $ Range low hi bound
     Range (Literal (Value nv _)) (Literal (Value mv _)) bound
       | VFloat16 n <- nv
       , VFloat16 m <- mv
@@ -398,7 +390,7 @@ controlFloat ::
   CtlOp ->
   CTree ValidatorPhase ->
   Validator ()
-controlFloat f op (CTreeE (VRuleRef n)) = controlFloat f op =<< dereference n
+controlFloat f op (CTreeE (VRuleRef n)) = dereference n $ controlFloat f op
 controlFloat f op ctrl = case op of
   Eq -> case ctrl of
     Literal (Value (VFloat16 f') _) -> verdict $ f == f'
@@ -418,7 +410,7 @@ validateDouble ::
   Double ->
   CTree ValidatorPhase ->
   Validator ()
-validateDouble f (CTreeE (VRuleRef n)) = validateDouble f =<< dereference n
+validateDouble f (CTreeE (VRuleRef n)) = dereference n $ validateDouble f
 validateDouble f (CTreeE (VValidator v _)) = v $ SingleTerm $ TDouble f
 validateDouble f rule =
   case rule of
@@ -435,12 +427,10 @@ validateDouble f rule =
     Control op tgt ctrl -> validateDouble f tgt >> controlDouble f op ctrl
     -- a = x..y
     -- TODO it is unclear if this should mix floating point types too
-    Range (CTreeE (VRuleRef n)) high bound -> do
-      lo <- dereference n
-      validateDouble f $ Range lo high bound
-    Range low (CTreeE (VRuleRef n)) bound -> do
-      hi <- dereference n
-      validateDouble f $ Range low hi bound
+    Range (CTreeE (VRuleRef n)) high bound ->
+      dereference n $ \lo -> validateDouble f $ Range lo high bound
+    Range low (CTreeE (VRuleRef n)) bound ->
+      dereference n $ \hi -> validateDouble f $ Range low hi bound
     Range (Literal (Value nv _)) (Literal (Value mv _)) bound
       | VFloat16 n <- nv
       , VFloat16 m <- mv
@@ -463,7 +453,7 @@ controlDouble ::
   CtlOp ->
   CTree ValidatorPhase ->
   Validator ()
-controlDouble f op (CTreeE (VRuleRef n)) = controlDouble f op =<< dereference n
+controlDouble f op (CTreeE (VRuleRef n)) = dereference n $ controlDouble f op
 controlDouble f op ctrl = case op of
   Eq -> case ctrl of
     Literal (Value (VFloat16 f') _) -> verdict $ f == float2Double f'
@@ -487,7 +477,7 @@ validateBool ::
   Bool ->
   CTree ValidatorPhase ->
   Validator ()
-validateBool b (CTreeE (VRuleRef n)) = validateBool b =<< dereference n
+validateBool b (CTreeE (VRuleRef n)) = dereference n $ validateBool b
 validateBool b (CTreeE (VValidator v _)) = v $ SingleTerm $ TBool b
 validateBool b rule =
   case rule of
@@ -510,7 +500,7 @@ controlBool ::
   CtlOp ->
   CTree ValidatorPhase ->
   Validator ()
-controlBool b op (CTreeE (VRuleRef n)) = controlBool b op =<< dereference n
+controlBool b op (CTreeE (VRuleRef n)) = dereference n $ controlBool b op
 controlBool b op ctrl = case op of
   Eq -> case ctrl of
     Literal (Value (VBool b') _) -> verdict $ b == b'
@@ -530,7 +520,7 @@ validateSimple ::
   Word8 ->
   CTree ValidatorPhase ->
   Validator ()
-validateSimple i (CTreeE (VRuleRef n)) = validateSimple i =<< dereference n
+validateSimple i (CTreeE (VRuleRef n)) = dereference n $ validateSimple i
 validateSimple i (CTreeE (VValidator v _)) = v $ SingleTerm $ TSimple i
 validateSimple 23 rule =
   case rule of
@@ -549,7 +539,7 @@ validateSimple n _ = error $ "Found simple different to 23! please report this s
 -- | Validating nil
 validateNull ::
   CTree ValidatorPhase -> Validator ()
-validateNull (CTreeE (VRuleRef n)) = validateNull =<< dereference n
+validateNull (CTreeE (VRuleRef n)) = dereference n validateNull
 validateNull (CTreeE (VValidator v _)) = v $ SingleTerm TNull
 validateNull rule =
   case rule of
@@ -568,7 +558,7 @@ validateBytes ::
   BS.ByteString ->
   CTree ValidatorPhase ->
   Validator ()
-validateBytes bs (CTreeE (VRuleRef n)) = validateBytes bs =<< dereference n
+validateBytes bs (CTreeE (VRuleRef n)) = dereference n $ validateBytes bs
 validateBytes bs (CTreeE (VValidator v _)) = v $ SingleTerm $ TBytes bs
 validateBytes bs rule =
   case rule of
@@ -591,16 +581,14 @@ controlBytes ::
   CtlOp ->
   CTree ValidatorPhase ->
   Validator ()
-controlBytes bs op (CTreeE (VRuleRef n)) = controlBytes bs op =<< dereference n
+controlBytes bs op (CTreeE (VRuleRef n)) = dereference n $ controlBytes bs op
 controlBytes bs op ctrl = case op of
   Size -> case ctrl of
     Literal (Value (VUInt sz) _) | fromIntegral (BS.length bs) == sz -> verdict True
-    Range (CTreeE (VRuleRef n)) high bound -> do
-      lo <- dereference n
-      controlBytes bs op $ Range lo high bound
+    Range (CTreeE (VRuleRef n)) high bound ->
+      dereference n $ \lo -> controlBytes bs op $ Range lo high bound
     Range low (CTreeE (VRuleRef n)) bound -> do
-      hi <- dereference n
-      controlBytes bs op $ Range low hi bound
+      dereference n $ \hi -> controlBytes bs op $ Range low hi bound
     Range low high bound ->
       let i = BS.length bs
        in case (low, high) of
@@ -651,7 +639,7 @@ validateText ::
   T.Text ->
   CTree ValidatorPhase ->
   Validator ()
-validateText txt (CTreeE (VRuleRef n)) = validateText txt =<< dereference n
+validateText txt (CTreeE (VRuleRef n)) = dereference n $ validateText txt
 validateText txt (CTreeE (VValidator v _)) = v $ SingleTerm $ TString txt
 validateText txt rule =
   case rule of
@@ -674,18 +662,16 @@ controlText ::
   CtlOp ->
   CTree ValidatorPhase ->
   Validator ()
-controlText bs op (CTreeE (VRuleRef n)) = controlText bs op =<< dereference n
+controlText bs op (CTreeE (VRuleRef n)) = dereference n $ controlText bs op
 controlText bs op ctrl = case op of
   Size ->
     let bsSize = BS.length $ encodeUtf8 bs
      in case ctrl of
           Literal (Value (VUInt (fromIntegral -> sz)) _) -> verdict $ bsSize == sz
-          Range (CTreeE (VRuleRef n)) high bound -> do
-            lo <- dereference n
-            controlText bs op $ Range lo high bound
-          Range low (CTreeE (VRuleRef n)) bound -> do
-            hi <- dereference n
-            controlText bs op $ Range low hi bound
+          Range (CTreeE (VRuleRef n)) high bound ->
+            dereference n $ \lo -> controlText bs op $ Range lo high bound
+          Range low (CTreeE (VRuleRef n)) bound ->
+            dereference n $ \hi -> controlText bs op $ Range low hi bound
           Range ff tt bound ->
             case (ff, tt) of
               (Literal (Value (VUInt (fromIntegral -> n)) _), Literal (Value (VUInt (fromIntegral -> m)) _)) ->
@@ -714,8 +700,7 @@ validateTagged ::
   Term ->
   CTree ValidatorPhase ->
   Validator ()
-validateTagged tag term (CTreeE (VRuleRef n)) =
-  validateTagged tag term =<< dereference n
+validateTagged tag term (CTreeE (VRuleRef n)) = dereference n $ validateTagged tag term
 validateTagged tag term (CTreeE (VValidator v _)) = v $ SingleTerm $ TTagged tag term
 validateTagged tag term rule =
   case rule of
@@ -766,7 +751,7 @@ validateList ::
   [Term] ->
   CTree ValidatorPhase ->
   Validator ()
-validateList terms (CTreeE (VRuleRef n)) = validateList terms =<< dereference n
+validateList terms (CTreeE (VRuleRef n)) = dereference n $ validateList terms
 validateList terms (CTreeE (VValidator v _)) = v $ SingleTerm $ TList terms
 validateList terms rule =
   case rule of
@@ -784,9 +769,8 @@ validateList terms rule =
     matchSingle :: CTree ValidatorPhase -> [Term] -> ValidatorT ListBlock [Term]
     matchSingle r [] = failWith $ ArrayLeftoverRule $ mapIndex r
     matchSingle r (t : ts) = case r of
-      CTreeE (VRuleRef n) -> do
-        ref <- dereference n
-        matchSingle ref (t : ts)
+      CTreeE (VRuleRef n) ->
+        dereference n $ \ref -> matchSingle ref (t : ts)
       CTreeE (VValidator v _) -> do
         element $ v $ SingleTerm t
         pure ts
@@ -838,7 +822,7 @@ validateMap ::
   [(Term, Term)] ->
   CTree ValidatorPhase ->
   Validator ()
-validateMap terms (CTreeE (VRuleRef n)) = validateMap terms =<< dereference n
+validateMap terms (CTreeE (VRuleRef n)) = dereference n $ validateMap terms
 validateMap terms (CTreeE (VValidator v _)) = v $ SingleTerm $ TMap terms
 validateMap terms rule =
   case rule of
@@ -864,8 +848,7 @@ validateMap terms rule =
     matchSingle r [] = failWith $ MapUnappliedRules $ mapIndex r NE.:| []
     matchSingle r ts@((k, v) : tt) = case r of
       CTreeE (VRuleRef n) -> do
-        r' <- dereference n
-        matchSingle r' ts
+        dereference n $ \r' -> matchSingle r' ts
       CTreeE (VValidator _ _) ->
         error
           "Custom validators not supported for individual map entries. Write a custom validator for the map instead"
@@ -898,7 +881,7 @@ validateMap terms rule =
     matchSeq tried rules [] = do
       let
         checkUnsatisfied = \case
-          CTreeE (VRuleRef n) -> checkUnsatisfied =<< dereference n
+          CTreeE (VRuleRef n) -> dereference n checkUnsatisfied
           Occur _ oi -> pure $ case oi of
             OIOptional -> False
             OIZeroOrMore -> False
@@ -940,7 +923,7 @@ getIndicesOfChoice x = mconcat <$> traverse go (toList x)
       Literal (Value (VUInt v) _) -> pure [fromIntegral v]
       KV _ v _ ->
         case v of
-          CTreeE (VRuleRef n) -> go =<< dereference n
+          CTreeE (VRuleRef n) -> dereference n go
           Literal (Value (VUInt v') _) -> pure [fromIntegral v']
           somethingElse ->
             error $
@@ -955,12 +938,10 @@ getIndicesOfChoice x = mconcat <$> traverse go (toList x)
 
 getIndicesOfRange ::
   CTree ValidatorPhase -> CTree ValidatorPhase -> RangeBound -> Validator [Word64]
-getIndicesOfRange (CTreeE (VRuleRef n)) tt incl = do
-  ff <- dereference n
-  getIndicesOfRange ff tt incl
-getIndicesOfRange ff (CTreeE (VRuleRef n)) incl = do
-  tt <- dereference n
-  getIndicesOfRange ff tt incl
+getIndicesOfRange (CTreeE (VRuleRef n)) tt incl =
+  dereference n $ \ff -> getIndicesOfRange ff tt incl
+getIndicesOfRange ff (CTreeE (VRuleRef n)) incl =
+  dereference n $ \tt -> getIndicesOfRange ff tt incl
 getIndicesOfRange ff tt incl =
   case (ff, tt) of
     (Literal (Value (VUInt ff') _), Literal (Value (VUInt tt') _)) ->
@@ -972,20 +953,18 @@ getIndicesOfRange ff tt incl =
     (lo, hi) -> error $ "Malformed range in .bits: (" <> showSimple lo <> ", " <> showSimple hi <> ")"
 
 getIndicesOfEnum :: CTree ValidatorPhase -> Validator [Word64]
-getIndicesOfEnum (CTreeE (VRuleRef n)) = getIndicesOfEnum =<< dereference n
+getIndicesOfEnum (CTreeE (VRuleRef n)) = dereference n getIndicesOfEnum
 getIndicesOfEnum g =
   case g of
     Group g' -> getIndicesOfChoice (fromJust $ NE.nonEmpty g')
     somethingElse -> error $ "Malformed enum in .bits: " <> showSimple somethingElse
 
-dereference :: Name -> ValidatorT b (CTree ValidatorPhase)
-dereference n@(Name s) = do
+dereference :: Name -> (CTree ValidatorPhase -> ValidatorT b a) -> ValidatorT b a
+dereference n@(Name s) act = do
   mRes <- lookupCddl n
   case mRes of
-    Just x -> pure x
+    Just x -> withRef n $ act x
     Nothing -> fail $ "Rule does not exist: " <> T.unpack s
-
--- mapTrace (ReferenceRule n) . f $ dereference cddl n
 
 --------------------------------------------------------------------------------
 -- Utils

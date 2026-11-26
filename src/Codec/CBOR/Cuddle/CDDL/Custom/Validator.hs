@@ -26,6 +26,7 @@ module Codec.CBOR.Cuddle.CDDL.Custom.Validator (
   accept,
   reject,
   failWith,
+  withRef,
   withChoice,
   withTag,
   withArray,
@@ -186,6 +187,9 @@ withArray = wrapBlock ArrayTrace
 
 withMap :: ValidatorT MapBlock () -> Validator ()
 withMap = wrapBlock MapTrace
+
+withRef :: Name -> ValidatorT b a -> ValidatorT b a
+withRef n = wrapBlock $ ReferenceRule n
 
 element :: Validator () -> ValidatorT ListBlock ()
 element m =
@@ -368,7 +372,7 @@ data ValidationTrace (b :: Block) (v :: Validity) where
   UnapplicableRule :: CTree MonoSimplePhase -> ValidationTrace TermBlock IsInvalid
   TerminalRule :: CTree MonoSimplePhase -> ValidationTrace TermBlock IsValid
   ControlTrace :: ControlInfo -> SValidity v -> ValidationTrace TermBlock v
-  ReferenceRule :: Name -> StepTrace TermBlock v -> ValidationTrace TermBlock v
+  ReferenceRule :: Name -> StepTrace b v -> ValidationTrace b v
   CustomSuccess :: ValidationTrace TermBlock IsValid
   CustomFailure :: Text -> ValidationTrace b IsInvalid
   UnsatisfiedControl :: CtlOp -> CTree MonoSimplePhase -> ValidationTrace TermBlock IsInvalid

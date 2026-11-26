@@ -12,7 +12,7 @@ module Test.Codec.CBOR.Cuddle.CDDL.Validator (
 ) where
 
 import Codec.CBOR.Cuddle.CBOR.Canonical (toCanonical)
-import Codec.CBOR.Cuddle.CBOR.Generator (generateFromName)
+import Codec.CBOR.Cuddle.CBOR.Generator (XXCTree (..), generateFromName)
 import Codec.CBOR.Cuddle.CBOR.Validator (
   ValidatorPhase,
   validateCBOR,
@@ -134,6 +134,8 @@ genAndValidateRule description name resolvedCddl =
 genAndValidateCddl :: String -> CTreeRoot MonoReferenced -> Spec
 genAndValidateCddl description resolvedCddl@(CTreeRoot m) = do
   let
+    isRule (CTree.CTreeE (MGenerator _ r)) = isRule r
+    isRule (CTree.CTreeE (MValidator _ r)) = isRule r
     isRule CTree.Group {} = False
     isRule _ = True
   describe description $ do
