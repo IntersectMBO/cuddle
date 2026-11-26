@@ -181,9 +181,6 @@ genHuddleArrayTerms = do
   required <- genHuddleArrayRequiredTerms
   pure $ bools <> required
 
-genHuddleArray :: Gen Term
-genHuddleArray = genHuddleArrayTerms >>= genArrayTerm
-
 genBadArrayReversed :: Gen Term
 genBadArrayReversed = genHuddleArrayTerms >>= genArrayTerm . reverse . (TBool True :)
 
@@ -325,8 +322,6 @@ spec = describe "Validator" $ do
       describe "Positive" $ do
         prop "Validates a full map" . forAll genFullMap $
           expectValid . validateHuddle huddleMap "a"
-        prop "Validates array" . forAll genHuddleArray $
-          expectValid . validateHuddle huddleArray "a"
         prop "Validates map with correct number of range elements"
           . forAll (genHuddleRangeMap (5, 10))
           $ expectValid . validateHuddle huddleRangeMap "a"

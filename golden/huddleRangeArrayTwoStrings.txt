@@ -1,7 +1,6 @@
 array
 └ app: [0;92mint[0m
   app: [0;92mint[0m
-  app: [0;92mtext[0m
-  app: [0;92mtext[0m
-  [0;91mrequired rule not satisfied:[0m
-    1* text
+  [0;91mfailed to apply required rule:[0m
+  └ [0;91mfailed to apply: 
+      int[0m

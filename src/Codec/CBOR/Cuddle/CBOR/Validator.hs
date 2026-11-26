@@ -202,9 +202,9 @@ validateInteger i rule =
           | (-n) <= i && range bound i m -> accept rule
           | otherwise -> reject rule
         (CTreeE (VRuleRef n), _) ->
-          dereference n $ \lo -> validateInteger i (Range lo high bound)
+          dereferenceNoTrace n $ \lo -> validateInteger i (Range lo high bound)
         (_, CTreeE (VRuleRef n)) -> do
-          dereference n $ \hi -> validateInteger i (Range low hi bound)
+          dereferenceNoTrace n $ \hi -> validateInteger i (Range low hi bound)
         (lo, hi) -> error $ "Unable to validate range: (" <> showSimple lo <> ", " <> showSimple hi <> ")"
     -- a = &(x, y, z)
     Enum g ->
@@ -238,7 +238,7 @@ controlInteger ::
   CtlOp ->
   CTree ValidatorPhase ->
   Validator ()
-controlInteger i op (CTreeE (VRuleRef n)) = dereference n $ controlInteger i op
+controlInteger i op (CTreeE (VRuleRef n)) = dereferenceNoTrace n $ controlInteger i op
 controlInteger i op ctrl = case op of
   Size -> case ctrl of
     Literal (Value (VUInt sz) _) -> verdict $ 0 <= i && i < 256 ^ sz
@@ -319,9 +319,9 @@ validateHalf f rule =
     Control op tgt ctrl -> validateHalf f tgt >> controlHalf f op ctrl
     -- a = x..y
     Range (CTreeE (VRuleRef n)) high bound -> do
-      dereference n $ \lo -> validateHalf f $ Range lo high bound
+      dereferenceNoTrace n $ \lo -> validateHalf f $ Range lo high bound
     Range low (CTreeE (VRuleRef n)) bound -> do
-      dereference n $ \hi -> validateHalf f $ Range low hi bound
+      dereferenceNoTrace n $ \hi -> validateHalf f $ Range low hi bound
     Range (Literal (Value (VFloat16 n) _)) (Literal (Value (VFloat16 m) _)) bound
       | n <= f && range bound f m -> accept rule
     _ -> reject rule
@@ -333,7 +333,7 @@ controlHalf ::
   CtlOp ->
   CTree ValidatorPhase ->
   Validator ()
-controlHalf f op (CTreeE (VRuleRef n)) = dereference n $ controlHalf f op
+controlHalf f op (CTreeE (VRuleRef n)) = dereferenceNoTrace n $ controlHalf f op
 controlHalf f op ctrl = case op of
   Eq -> case ctrl of
     Literal (Value (VFloat16 f') _) -> verdict $ f == f'
@@ -369,9 +369,9 @@ validateFloat f rule =
     -- a = x..y
     -- TODO it is unclear if this should mix floating point types too
     Range (CTreeE (VRuleRef n)) high bound ->
-      dereference n $ \lo -> validateFloat f $ Range lo high bound
+      dereferenceNoTrace n $ \lo -> validateFloat f $ Range lo high bound
     Range low (CTreeE (VRuleRef n)) bound ->
-      dereference n $ \hi -> validateFloat f $ Range low hi bound
+      dereferenceNoTrace n $ \hi -> validateFloat f $ Range low hi bound
     Range (Literal (Value nv _)) (Literal (Value mv _)) bound
       | VFloat16 n <- nv
       , VFloat16 m <- mv
@@ -390,7 +390,7 @@ controlFloat ::
   CtlOp ->
   CTree ValidatorPhase ->
   Validator ()
-controlFloat f op (CTreeE (VRuleRef n)) = dereference n $ controlFloat f op
+controlFloat f op (CTreeE (VRuleRef n)) = dereferenceNoTrace n $ controlFloat f op
 controlFloat f op ctrl = case op of
   Eq -> case ctrl of
     Literal (Value (VFloat16 f') _) -> verdict $ f == f'
@@ -428,9 +428,9 @@ validateDouble f rule =
     -- a = x..y
     -- TODO it is unclear if this should mix floating point types too
     Range (CTreeE (VRuleRef n)) high bound ->
-      dereference n $ \lo -> validateDouble f $ Range lo high bound
+      dereferenceNoTrace n $ \lo -> validateDouble f $ Range lo high bound
     Range low (CTreeE (VRuleRef n)) bound ->
-      dereference n $ \hi -> validateDouble f $ Range low hi bound
+      dereferenceNoTrace n $ \hi -> validateDouble f $ Range low hi bound
     Range (Literal (Value nv _)) (Literal (Value mv _)) bound
       | VFloat16 n <- nv
       , VFloat16 m <- mv
@@ -453,7 +453,7 @@ controlDouble ::
   CtlOp ->
   CTree ValidatorPhase ->
   Validator ()
-controlDouble f op (CTreeE (VRuleRef n)) = dereference n $ controlDouble f op
+controlDouble f op (CTreeE (VRuleRef n)) = dereferenceNoTrace n $ controlDouble f op
 controlDouble f op ctrl = case op of
   Eq -> case ctrl of
     Literal (Value (VFloat16 f') _) -> verdict $ f == float2Double f'
@@ -500,7 +500,7 @@ controlBool ::
   CtlOp ->
   CTree ValidatorPhase ->
   Validator ()
-controlBool b op (CTreeE (VRuleRef n)) = dereference n $ controlBool b op
+controlBool b op (CTreeE (VRuleRef n)) = dereferenceNoTrace n $ controlBool b op
 controlBool b op ctrl = case op of
   Eq -> case ctrl of
     Literal (Value (VBool b') _) -> verdict $ b == b'
@@ -581,14 +581,14 @@ controlBytes ::
   CtlOp ->
   CTree ValidatorPhase ->
   Validator ()
-controlBytes bs op (CTreeE (VRuleRef n)) = dereference n $ controlBytes bs op
+controlBytes bs op (CTreeE (VRuleRef n)) = dereferenceNoTrace n $ controlBytes bs op
 controlBytes bs op ctrl = case op of
   Size -> case ctrl of
     Literal (Value (VUInt sz) _) | fromIntegral (BS.length bs) == sz -> verdict True
     Range (CTreeE (VRuleRef n)) high bound ->
-      dereference n $ \lo -> controlBytes bs op $ Range lo high bound
+      dereferenceNoTrace n $ \lo -> controlBytes bs op $ Range lo high bound
     Range low (CTreeE (VRuleRef n)) bound -> do
-      dereference n $ \hi -> controlBytes bs op $ Range low hi bound
+      dereferenceNoTrace n $ \hi -> controlBytes bs op $ Range low hi bound
     Range low high bound ->
       let i = BS.length bs
        in case (low, high) of
@@ -622,10 +622,10 @@ controlBytes bs op ctrl = case op of
                   Just byte -> not (testBit byte bitIndex) || IS.member n allowedSet
                   Nothing -> True
   Cbor -> case deserialiseFromBytes decodeTerm (BSL.fromStrict bs) of
-    Right (BSL.null -> True, term) -> validateTerm term ctrl
+    Right (BSL.null -> True, term) -> withCborControl ctrl $ validateTerm term ctrl
     _ -> verdict False
   Cborseq -> case deserialiseFromBytes decodeTerm (BSL.fromStrict (BS.snoc (BS.cons 0x9f bs) 0xff)) of
-    Right (BSL.null -> True, TListI terms) -> validateTerm (TList terms) (Array [Occur ctrl OIZeroOrMore])
+    Right (BSL.null -> True, TListI terms) -> withCborseqControl ctrl $ validateListBlock terms [Occur ctrl OIZeroOrMore]
     _ -> verdict False
   _ -> error $ "Not yet implmented for bytes: " <> show op
   where
@@ -662,16 +662,16 @@ controlText ::
   CtlOp ->
   CTree ValidatorPhase ->
   Validator ()
-controlText bs op (CTreeE (VRuleRef n)) = dereference n $ controlText bs op
+controlText bs op (CTreeE (VRuleRef n)) = dereferenceNoTrace n $ controlText bs op
 controlText bs op ctrl = case op of
   Size ->
     let bsSize = BS.length $ encodeUtf8 bs
      in case ctrl of
           Literal (Value (VUInt (fromIntegral -> sz)) _) -> verdict $ bsSize == sz
           Range (CTreeE (VRuleRef n)) high bound ->
-            dereference n $ \lo -> controlText bs op $ Range lo high bound
+            dereferenceNoTrace n $ \lo -> controlText bs op $ Range lo high bound
           Range low (CTreeE (VRuleRef n)) bound ->
-            dereference n $ \hi -> controlText bs op $ Range low hi bound
+            dereferenceNoTrace n $ \hi -> controlText bs op $ Range low hi bound
           Range ff tt bound ->
             case (ff, tt) of
               (Literal (Value (VUInt (fromIntegral -> n)) _), Literal (Value (VUInt (fromIntegral -> m)) _)) ->
@@ -747,30 +747,22 @@ closestMatch tryRule candidates = do
     unwrapOccur (Occur ct _) = ct
     unwrapOccur ct = ct
 
-validateList ::
+validateListBlock ::
   [Term] ->
-  CTree ValidatorPhase ->
-  Validator ()
-validateList terms (CTreeE (VRuleRef n)) = dereference n $ validateList terms
-validateList terms (CTreeE (VValidator v _)) = v $ SingleTerm $ TList terms
-validateList terms rule =
-  case rule of
-    Postlude PTAny -> accept rule
-    Array rules -> withArray $ do
-      res <- matchSeq rules terms
-      case res of
-        [] -> pure ()
-        t : ts -> do
-          closest <- closestMatch (validateTerm t) . reverse $ [r | r@Occur {} <- rules]
-          failWith $ ArrayLeftoverTerms (t NE.:| ts) closest
-    Choice opts -> validateChoice (validateList terms) opts
-    _ -> reject rule
+  [CTree ValidatorPhase] ->
+  ValidatorT ListBlock ()
+validateListBlock terms rules = do
+  res <- matchSeq rules terms
+  case res of
+    [] -> pure ()
+    t : ts -> do
+      closest <- closestMatch (validateTerm t) . reverse $ [r | r@Occur {} <- rules]
+      failWith $ ArrayLeftoverTerms (t NE.:| ts) closest
   where
     matchSingle :: CTree ValidatorPhase -> [Term] -> ValidatorT ListBlock [Term]
     matchSingle r [] = failWith $ ArrayLeftoverRule $ mapIndex r
     matchSingle r (t : ts) = case r of
-      CTreeE (VRuleRef n) ->
-        dereference n $ \ref -> matchSingle ref (t : ts)
+      CTreeE (VRuleRef n) -> dereference n $ \ref -> matchSingle ref (t : ts)
       CTreeE (VValidator v _) -> do
         element $ v $ SingleTerm t
         pure ts
@@ -814,25 +806,30 @@ validateList terms rule =
         remainingTerms <- matchSingle r ts
         matchSeq rs remainingTerms
 
+validateList ::
+  [Term] ->
+  CTree ValidatorPhase ->
+  Validator ()
+validateList terms (CTreeE (VRuleRef n)) = dereference n $ validateList terms
+validateList terms (CTreeE (VValidator v _)) = v $ SingleTerm $ TList terms
+validateList terms rule =
+  case rule of
+    Postlude PTAny -> accept rule
+    Array rules -> withArray $ validateListBlock terms rules
+    Choice opts -> validateChoice (validateList terms) opts
+    _ -> reject rule
+
 --------------------------------------------------------------------------------
 -- Maps
 
-validateMap ::
-  HasCallStack =>
+validateMapBlock ::
   [(Term, Term)] ->
-  CTree ValidatorPhase ->
-  Validator ()
-validateMap terms (CTreeE (VRuleRef n)) = dereference n $ validateMap terms
-validateMap terms (CTreeE (VValidator v _)) = v $ SingleTerm $ TMap terms
-validateMap terms rule =
-  case rule of
-    Postlude PTAny -> accept rule
-    Map rules -> withMap $ do
-      checkDuplicates $ toCanonical . fst <$> terms
-      _ <- matchSeq [] rules terms
-      pure ()
-    Choice opts -> validateChoice (validateMap terms) opts
-    _ -> reject rule
+  [CTree ValidatorPhase] ->
+  ValidatorT MapBlock ()
+validateMapBlock terms rules = do
+  checkDuplicates $ toCanonical . fst <$> terms
+  _ <- matchSeq [] rules terms
+  pure ()
   where
     checkDuplicates = go mempty
       where
@@ -855,7 +852,7 @@ validateMap terms rule =
       KV kr vr _ -> do
         entry (validateTerm k kr) (validateTerm v vr)
         pure tt
-      Group rules -> matchSeq [] rules ts
+      Group rs -> matchSeq [] rs ts
       _ -> error "Unsupported rule in map"
 
     consumeOne ::
@@ -878,7 +875,7 @@ validateMap terms rule =
       [CTree ValidatorPhase] ->
       [(Term, Term)] ->
       ValidatorT MapBlock [(Term, Term)]
-    matchSeq tried rules [] = do
+    matchSeq tried rs [] = do
       let
         checkUnsatisfied = \case
           CTreeE (VRuleRef n) -> dereference n checkUnsatisfied
@@ -888,7 +885,7 @@ validateMap terms rule =
             OIBounded mlb _ -> maybe False (> 0) mlb
             OIOneOrMore -> True
           _ -> pure True
-      unappliedRules <- filterM checkUnsatisfied (reverse tried <> rules)
+      unappliedRules <- filterM checkUnsatisfied (reverse tried <> rs)
       case unappliedRules of
         [] -> pure []
         x : xs -> failWith $ MapUnappliedRules $ mapIndex <$> x NE.:| xs
@@ -901,6 +898,20 @@ validateMap terms rule =
           matchSeq [] (reverse tried <> maybeToList r' <> rs) rest
       )
         <|> matchSeq (r : tried) rs ts
+
+validateMap ::
+  HasCallStack =>
+  [(Term, Term)] ->
+  CTree ValidatorPhase ->
+  Validator ()
+validateMap terms (CTreeE (VRuleRef n)) = dereference n $ validateMap terms
+validateMap terms (CTreeE (VValidator v _)) = v $ SingleTerm $ TMap terms
+validateMap terms rule =
+  case rule of
+    Postlude PTAny -> accept rule
+    Map rules -> withMap $ validateMapBlock terms rules
+    Choice opts -> validateChoice (validateMap terms) opts
+    _ -> reject rule
 
 --------------------------------------------------------------------------------
 -- Choices
@@ -923,7 +934,7 @@ getIndicesOfChoice x = mconcat <$> traverse go (toList x)
       Literal (Value (VUInt v) _) -> pure [fromIntegral v]
       KV _ v _ ->
         case v of
-          CTreeE (VRuleRef n) -> dereference n go
+          CTreeE (VRuleRef n) -> dereferenceNoTrace n go
           Literal (Value (VUInt v') _) -> pure [fromIntegral v']
           somethingElse ->
             error $
@@ -939,9 +950,9 @@ getIndicesOfChoice x = mconcat <$> traverse go (toList x)
 getIndicesOfRange ::
   CTree ValidatorPhase -> CTree ValidatorPhase -> RangeBound -> Validator [Word64]
 getIndicesOfRange (CTreeE (VRuleRef n)) tt incl =
-  dereference n $ \ff -> getIndicesOfRange ff tt incl
+  dereferenceNoTrace n $ \ff -> getIndicesOfRange ff tt incl
 getIndicesOfRange ff (CTreeE (VRuleRef n)) incl =
-  dereference n $ \tt -> getIndicesOfRange ff tt incl
+  dereferenceNoTrace n $ \tt -> getIndicesOfRange ff tt incl
 getIndicesOfRange ff tt incl =
   case (ff, tt) of
     (Literal (Value (VUInt ff') _), Literal (Value (VUInt tt') _)) ->
@@ -953,18 +964,21 @@ getIndicesOfRange ff tt incl =
     (lo, hi) -> error $ "Malformed range in .bits: (" <> showSimple lo <> ", " <> showSimple hi <> ")"
 
 getIndicesOfEnum :: CTree ValidatorPhase -> Validator [Word64]
-getIndicesOfEnum (CTreeE (VRuleRef n)) = dereference n getIndicesOfEnum
+getIndicesOfEnum (CTreeE (VRuleRef n)) = dereferenceNoTrace n getIndicesOfEnum
 getIndicesOfEnum g =
   case g of
     Group g' -> getIndicesOfChoice (fromJust $ NE.nonEmpty g')
     somethingElse -> error $ "Malformed enum in .bits: " <> showSimple somethingElse
 
-dereference :: Name -> (CTree ValidatorPhase -> ValidatorT b a) -> ValidatorT b a
-dereference n@(Name s) act = do
+dereferenceNoTrace :: Name -> (CTree ValidatorPhase -> ValidatorT b a) -> ValidatorT b a
+dereferenceNoTrace n act = do
   mRes <- lookupCddl n
   case mRes of
-    Just x -> withRef n $ act x
-    Nothing -> fail $ "Rule does not exist: " <> T.unpack s
+    Just x -> act x
+    Nothing -> fail "Rule does not exist"
+
+dereference :: Name -> (CTree ValidatorPhase -> ValidatorT b a) -> ValidatorT b a
+dereference n = withRef n . dereferenceNoTrace n
 
 --------------------------------------------------------------------------------
 -- Utils

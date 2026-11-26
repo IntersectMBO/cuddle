@@ -31,6 +31,8 @@ module Codec.CBOR.Cuddle.CDDL.Custom.Validator (
   withTag,
   withArray,
   withMap,
+  withCborControl,
+  withCborseqControl,
   controlVerdict,
   element,
   entry,
@@ -190,6 +192,12 @@ withMap = wrapBlock MapTrace
 
 withRef :: Name -> ValidatorT b a -> ValidatorT b a
 withRef n = wrapBlock $ ReferenceRule n
+
+withCborControl :: CTree ValidatorPhase -> Validator () -> Validator ()
+withCborControl r = wrapBlock $ CborControlTrace $ mapIndex r
+
+withCborseqControl :: CTree ValidatorPhase -> ValidatorT ListBlock () -> Validator ()
+withCborseqControl r = wrapBlock $ CborseqControlTrace $ mapIndex r
 
 element :: Validator () -> ValidatorT ListBlock ()
 element m =
@@ -372,6 +380,10 @@ data ValidationTrace (b :: Block) (v :: Validity) where
   UnapplicableRule :: CTree MonoSimplePhase -> ValidationTrace TermBlock IsInvalid
   TerminalRule :: CTree MonoSimplePhase -> ValidationTrace TermBlock IsValid
   ControlTrace :: ControlInfo -> SValidity v -> ValidationTrace TermBlock v
+  CborControlTrace ::
+    CTree MonoSimplePhase -> StepTrace TermBlock v -> ValidationTrace TermBlock v
+  CborseqControlTrace ::
+    CTree MonoSimplePhase -> StepTrace ListBlock v -> ValidationTrace TermBlock v
   ReferenceRule :: Name -> StepTrace b v -> ValidationTrace b v
   CustomSuccess :: ValidationTrace TermBlock IsValid
   CustomFailure :: Text -> ValidationTrace b IsInvalid
@@ -424,6 +436,8 @@ instance IsValidationTrace (ValidationTrace b) where
   traceValidity = \case
     TerminalRule {} -> SValid
     ControlTrace _ v -> v
+    CborControlTrace _ x -> traceValidity x
+    CborseqControlTrace _ x -> traceValidity x
     AlternativeFail -> SInvalid
     UnapplicableRule {} -> SInvalid
     ReferenceRule _ x -> traceValidity x
@@ -451,6 +465,12 @@ instance IsValidationTrace (ValidationTrace b) where
     TerminalRule {} -> Progress 1 0
     ControlTrace _ SValid -> Progress 0 1
     ControlTrace _ SInvalid -> mempty
+    CborControlTrace _ trc
+      | SValid <- traceValidity trc -> Progress 0 1
+      | otherwise -> mempty
+    CborseqControlTrace _ trc
+      | SValid <- traceValidity trc -> Progress 0 1
+      | otherwise -> mempty
     AlternativeFail -> mempty
     UnapplicableRule {} -> mempty
     ReferenceRule _ x -> increaseRefProgress $ measureProgress x
@@ -527,14 +547,21 @@ prettyValidationTrace opts = \case
   AlternativeFail -> mempty
   UnapplicableRule x -> annotate (color Red) $ vsep ["failed to apply: ", indent 2 $ pretty x]
   ControlTrace ci v ->
-    let col = case v of
-          SValid -> Green
-          SInvalid -> Red
-     in vsep
-          [ "ctrl:" <+> annotate (color col) ("." <> pretty ci) <+> case v of
-              SValid -> mempty
-              SInvalid -> "(failed)"
-          ]
+    "ctrl:" <+> ("." <> pretty ci) <+> case v of
+      SValid -> mempty
+      SInvalid -> failedDoc
+  CborControlTrace rule trc ->
+    vsep
+      [ "ctrl: .cbor" <+> pretty rule <+> case traceValidity trc of
+          SValid -> mempty
+          SInvalid -> failedDoc
+      , nestContainer $ prettyStepTraceWithFold False opts trc
+      ]
+  CborseqControlTrace rule trc ->
+    vsep
+      [ "ctrl: .cborseq" <+> pretty rule
+      , nestContainer $ prettyStepTrace opts trc
+      ]
   ChoiceBranch i c ->
     vsep
       [ "choice (idx: " <> pretty i <> ")"
@@ -576,7 +603,7 @@ prettyValidationTrace opts = \case
     hang 2 $
       vsep
         [ annotate (color Red) "leftover elements, closest matching rule:"
-        , annotate (color Green) $ pretty $ show rule
+        , annotate (color Green) $ pretty rule
         , nestContainer $ prettyStepTraceWithFold True opts trc
         ]
   ArrayLeftoverRule r ->
@@ -616,21 +643,20 @@ prettyValidationTrace opts = \case
       ]
   MapInvalidKey k ->
     vsep
-      [ "key:" <+> annotate (color Red) "(fail)"
+      [ "key:" <+> failedDoc
       , nestContainer $ prettyStepTraceWithFold False opts k
       ]
   MapInvalidValue k v ->
     vsep
       [ "key:"
       , nestContainer $ prettyStepTraceWithFold False opts k
-      , "value:" <+> annotate (color Red) "(fail)"
+      , "value:" <+> failedDoc
       , nestContainer $ prettyStepTraceWithFold False opts v
       ]
-  MapDuplicateKeys _ ->
-    vsep
-      [ "key: " <> annotate (color Red) "(duplicate)"
-      ]
+  MapDuplicateKeys _ -> "duplicate keys found"
   where
+    failedDoc = annotate (color Red) "(failed)"
+
     prettyGroup :: [Name] -> StepTrace ListBlock v -> [Doc AnsiStyle]
     prettyGroup refs x = go refs
       where
@@ -639,9 +665,9 @@ prettyValidationTrace opts = \case
           , nestContainer . vsep $ go ns
           ]
         go [] =
-          [ case traceValidity x of
-              SValid -> "grp"
-              SInvalid -> "grp" <+> annotate (color Red) "(fail)"
+          [ "grp" <+> case traceValidity x of
+              SValid -> mempty
+              SInvalid -> failedDoc
           , nestContainer $ prettyStepTraceWithFold True opts x
           ]
 

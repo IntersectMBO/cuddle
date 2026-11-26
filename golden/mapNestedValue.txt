@@ -3,7 +3,7 @@ map
     [0;92m? 1 ==> bar[0m
     └ key:
       └ app: [0;92m1[0m
-      value: [0;91m(fail)[0m
+      value: [0;91m(failed)[0m
       └ ref: [0;94mbar[0m
         └ array
           └ app: [0;92mint[0m
