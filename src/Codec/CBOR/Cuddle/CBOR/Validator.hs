@@ -22,12 +22,14 @@ import Codec.CBOR.Cuddle.CDDL.Phase (showSimple)
 import Codec.CBOR.Cuddle.IndexMappable (IndexMappable (..))
 import Codec.CBOR.Read
 import Codec.CBOR.Term
-import Control.Applicative (optional)
+import Control.Applicative (Alternative (..), optional)
+import Control.Monad (filterM)
 import Data.Bits hiding (And)
 import Data.ByteString qualified as BS
 import Data.ByteString.Lazy qualified as BSL
-import Data.Foldable (Foldable (..), asum)
+import Data.Foldable (Foldable (..), asum, foldrM)
 import Data.Function (on)
+import Data.Functor (($>))
 import Data.IntSet qualified as IS
 import Data.List (maximumBy)
 import Data.List.NonEmpty qualified as NE
@@ -877,44 +879,47 @@ validateMap terms rule =
       Group rules -> matchSeq [] rules ts
       _ -> error "Unsupported rule in map"
 
+    consumeOne ::
+      CTree ValidatorPhase ->
+      [(Term, Term)] ->
+      ValidatorT MapBlock ([(Term, Term)], Maybe (CTree ValidatorPhase))
+    consumeOne r ts = case r of
+      Occur _ (OIBounded _ (Just 0)) -> empty -- no capacity left
+      Occur ct oi -> (,next ct oi) <$> matchSingle ct ts
+      _ -> (,Nothing) <$> matchSingle r ts
+      where
+        next ct = \case
+          OIOptional -> Nothing
+          OIOneOrMore -> Just $ Occur ct OIZeroOrMore
+          OIZeroOrMore -> Just $ Occur ct OIZeroOrMore
+          OIBounded mlb mub -> Just $ Occur ct $ OIBounded (clampedPred <$> mlb) (clampedPred <$> mub)
+
     matchSeq ::
       [CTree ValidatorPhase] ->
       [CTree ValidatorPhase] ->
       [(Term, Term)] ->
       ValidatorT MapBlock [(Term, Term)]
-    matchSeq _ [] ts = pure ts
-    matchSeq tried (curRule : remaining) ts =
-      case curRule of
-        Occur ct oi -> case oi of
-          OIOptional -> do
-            res <- optional $ matchSingle ct ts
-            resetWith Nothing $ fromMaybe ts res
-          OIZeroOrMore -> do
-            res <- optional $ matchSingle ct ts
-            resetWith (Just curRule) $ fromMaybe ts res
-          OIOneOrMore -> do
-            remainingTerms <- matchSingle ct ts
-            resetWith (Just $ Occur ct OIZeroOrMore) remainingTerms
-          OIBounded mlb mub
-            | maybe False (> 0) mlb -> do
-                remainingTerms <- matchSingle ct ts
-                resetWith (Just newBounds) remainingTerms
-            | maybe True (> 0) mub -> do
-                res <- optional $ matchSingle ct ts
-                case res of
-                  Just remainingTerms -> resetWith (Just newBounds) remainingTerms
-                  Nothing -> resetWith Nothing ts
-            | otherwise -> resetWith Nothing ts
-            where
-              newBounds = Occur ct $ OIBounded (clampedPred <$> mlb) (clampedPred <$> mub)
-        _ -> do
-          res <- optional $ matchSingle curRule ts
-          case res of
-            Just remainingTerms -> resetWith Nothing remainingTerms
-            Nothing -> continue
-      where
-        resetWith newRule = matchSeq [] (reverse tried <> maybeToList newRule <> remaining)
-        continue = matchSeq (curRule : tried) remaining ts
+    matchSeq tried rules [] = do
+      let
+        checkUnsatisfied = \case
+          CTreeE (VRuleRef n) -> checkUnsatisfied =<< dereference n
+          Occur _ oi -> pure $ case oi of
+            OIOptional -> False
+            OIZeroOrMore -> False
+            OIBounded mlb _ -> maybe False (> 0) mlb
+            OIOneOrMore -> True
+          _ -> pure True
+      unappliedRules <- filterM checkUnsatisfied (reverse tried <> rules)
+      case unappliedRules of
+        [] -> pure []
+        x : xs -> failWith $ MapUnappliedRules $ mapIndex <$> x NE.:| xs
+    matchSeq _ [] (t : ts) = failWith $ MapLeftoverEntries (t NE.:| ts) Nothing
+    matchSeq tried (r : rs) ts =
+      ( do
+          (rest, r') <- consumeOne r ts
+          matchSeq [] (reverse tried <> maybeToList r' <> rs) rest
+      )
+        <|> matchSeq (r : tried) rs ts
 
 --------------------------------------------------------------------------------
 -- Choices
