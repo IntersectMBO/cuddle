@@ -49,6 +49,7 @@ module Codec.CBOR.Cuddle.CDDL.Custom.Validator (
   foldEvidenced,
   measureProgress,
   prettyValidationTrace,
+  prettyStepTrace,
 ) where
 
 import Codec.CBOR.Cuddle.CBOR.Canonical (CanonicalTerm)
@@ -466,7 +467,7 @@ instance IsValidationTrace (ValidationTrace b) where
     MapEntry k v -> measureProgress k <> measureProgress v
     MapInvalidKey k -> measureProgress k
     MapInvalidValue k v -> measureProgress k <> measureProgress v
-    MapDuplicateKeys x -> measureProgress x
+    MapDuplicateKeys _ -> mempty
     MapUnappliedRules {} -> mempty
     MapLeftoverEntries _ Nothing -> mempty
     MapLeftoverEntries _ (Just (_, x)) -> measureProgress x
@@ -498,8 +499,11 @@ newtype TraceOptions = TraceOptions
 defaultTraceOptions :: TraceOptions
 defaultTraceOptions = TraceOptions {toFoldValid = False}
 
-prettyStepTrace :: Bool -> TraceOptions -> StepTrace b v -> Doc AnsiStyle
-prettyStepTrace mayFold opts@TraceOptions {..} steps
+prettyStepTrace :: TraceOptions -> StepTrace b v -> Doc AnsiStyle
+prettyStepTrace opts@TraceOptions {..} = prettyStepTraceWithFold toFoldValid opts
+
+prettyStepTraceWithFold :: Bool -> TraceOptions -> StepTrace b v -> Doc AnsiStyle
+prettyStepTraceWithFold mayFold opts@TraceOptions {..} steps
   | toFoldValid && mayFold =
       vsep $
         [ annotate italicized $ "... " <> pretty (length validInit) <> " valid entries not shown"
@@ -530,12 +534,12 @@ prettyValidationTrace opts = \case
   ChoiceBranch i c ->
     vsep
       [ "choice (idx: " <> pretty i <> ")"
-      , nestContainer $ prettyStepTrace False opts c
+      , nestContainer $ prettyStepTraceWithFold False opts c
       ]
   ReferenceRule (Name n) x ->
     vsep
       [ "ref: " <> annotate (color Blue) (pretty n)
-      , nestContainer $ prettyStepTrace False opts x
+      , nestContainer $ prettyStepTraceWithFold False opts x
       ]
   CustomSuccess -> "<custom validator>"
   CustomFailure e -> annotate (color Red) $ pretty e
@@ -548,17 +552,17 @@ prettyValidationTrace opts = \case
   ArrayTrace l ->
     vsep
       [ "array"
-      , nestContainer $ prettyStepTrace False opts l
+      , nestContainer $ prettyStepTraceWithFold False opts l
       ]
   MapTrace m ->
     vsep
       [ "map"
-      , nestContainer $ prettyStepTrace False opts m
+      , nestContainer $ prettyStepTraceWithFold False opts m
       ]
   TagTrace t x ->
     vsep
       [ "tag:" <+> annotate (color Green) ("#6." <> pretty t)
-      , nestContainer $ prettyStepTrace False opts x
+      , nestContainer $ prettyStepTraceWithFold False opts x
       ]
   InvalidTag expected actual ->
     "expected tag #6." <> pretty expected <> ", got #6." <> pretty actual
@@ -569,7 +573,7 @@ prettyValidationTrace opts = \case
       vsep
         [ annotate (color Red) "leftover elements, closest matching rule:"
         , annotate (color Green) $ pretty $ show rule
-        , nestContainer $ prettyStepTrace True opts trc
+        , nestContainer $ prettyStepTraceWithFold True opts trc
         ]
   ArrayLeftoverRule r ->
     hang 2 $
@@ -577,11 +581,11 @@ prettyValidationTrace opts = \case
         [ annotate (color Red) "required rule not satisfied:"
         , pretty r
         ]
-  ArrayElement steps -> vsep [prettyStepTrace True opts steps]
+  ArrayElement steps -> vsep [prettyStepTraceWithFold True opts steps]
   ArrayMissingRequired t ->
     vsep
       [ annotate (color Red) "failed to apply required rule:"
-      , nestContainer $ prettyStepTrace True opts t
+      , nestContainer $ prettyStepTraceWithFold True opts t
       ]
   ArrayConsumeGroup refs x -> vsep $ prettyGroup refs x
   MapLeftoverEntries _ Nothing ->
@@ -591,7 +595,7 @@ prettyValidationTrace opts = \case
       vsep
         [ annotate (color Red) "leftover key-value pairs, closest matching rule:"
         , annotate (color Green) $ pretty rule
-        , nestContainer $ prettyStepTrace True opts trc
+        , nestContainer $ prettyStepTraceWithFold True opts trc
         ]
   MapUnappliedRules rs ->
     hang 2 $
@@ -602,21 +606,21 @@ prettyValidationTrace opts = \case
   MapEntry k v ->
     vsep
       [ "key:"
-      , nestContainer $ prettyStepTrace True opts k
+      , nestContainer $ prettyStepTraceWithFold True opts k
       , "value:"
-      , nestContainer $ prettyStepTrace True opts v
+      , nestContainer $ prettyStepTraceWithFold True opts v
       ]
   MapInvalidKey k ->
     vsep
       [ "key:" <+> annotate (color Red) "(fail)"
-      , nestContainer $ prettyStepTrace False opts k
+      , nestContainer $ prettyStepTraceWithFold False opts k
       ]
   MapInvalidValue k v ->
     vsep
       [ "key:"
-      , nestContainer $ prettyStepTrace False opts k
+      , nestContainer $ prettyStepTraceWithFold False opts k
       , "value:" <+> annotate (color Red) "(fail)"
-      , nestContainer $ prettyStepTrace False opts v
+      , nestContainer $ prettyStepTraceWithFold False opts v
       ]
   MapDuplicateKeys _ ->
     vsep
@@ -634,7 +638,7 @@ prettyValidationTrace opts = \case
           [ case traceValidity x of
               SValid -> "grp"
               SInvalid -> "grp" <+> annotate (color Red) "(fail)"
-          , nestContainer $ prettyStepTrace True opts x
+          , nestContainer $ prettyStepTraceWithFold True opts x
           ]
 
 showValidationTrace :: ValidationTrace b v -> String

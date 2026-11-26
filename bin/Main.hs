@@ -18,7 +18,7 @@ import Codec.CBOR.Cuddle.CDDL.Custom.Validator (
   Evidenced (..),
   SValidity (..),
   TraceOptions (..),
-  prettyValidationTrace,
+  prettyStepTrace,
  )
 import Codec.CBOR.Cuddle.CDDL.Postlude (appendPostlude)
 import Codec.CBOR.Cuddle.CDDL.Resolve (
@@ -451,7 +451,7 @@ runValidateCBOR bs rule cddl traceOpts =
       exitFailure
     Right (Evidenced validity trc) -> do
       T.putStrLn . Ansi.renderStrict . layoutPretty defaultLayoutOptions $
-        prettyValidationTrace traceOpts trc
+        prettyStepTrace traceOpts trc
       putStrLn mempty
       case validity of
         SValid -> do

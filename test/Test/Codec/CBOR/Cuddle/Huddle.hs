@@ -8,6 +8,7 @@
 module Test.Codec.CBOR.Cuddle.Huddle where
 
 import Codec.CBOR.Cuddle.CDDL (CDDL, fromRules, sortCDDL)
+import Codec.CBOR.Cuddle.CDDL.Phase (HuddleStage)
 import Codec.CBOR.Cuddle.Comments (Comment)
 import Codec.CBOR.Cuddle.Huddle
 import Codec.CBOR.Cuddle.IndexMappable (IndexMappable (..))

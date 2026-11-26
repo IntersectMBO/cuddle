@@ -17,19 +17,20 @@ import Codec.CBOR.Cuddle.CBOR.Validator (
   ValidatorPhase,
   validateCBOR,
  )
-import Codec.CBOR.Cuddle.CBOR.Validator.Trace (
-  Evidenced (..),
-  SValidity (..),
-  ValidationTrace,
-  defaultTraceOptions,
-  prettyValidationTrace,
- )
-import Codec.CBOR.Cuddle.CDDL (Name (..))
+import Codec.CBOR.Cuddle.CDDL (Name (..), mapCDDLDropExt)
 import Codec.CBOR.Cuddle.CDDL.CTree (CTreeRoot (..))
 import Codec.CBOR.Cuddle.CDDL.CTree qualified as CTree
 import Codec.CBOR.Cuddle.CDDL.Custom.Core (RuleTerm (..))
 import Codec.CBOR.Cuddle.CDDL.Custom.Generator (GenConfig (..), runCBORGen)
-import Codec.CBOR.Cuddle.CDDL.Custom.Validator (TermValidator)
+import Codec.CBOR.Cuddle.CDDL.Custom.Validator (
+  Block (..),
+  Evidenced (..),
+  SValidity (..),
+  StepTrace,
+  TermValidator,
+  defaultTraceOptions,
+  prettyStepTrace,
+ )
 import Codec.CBOR.Cuddle.CDDL.Postlude (appendPostlude)
 import Codec.CBOR.Cuddle.CDDL.Resolve (MonoReferenced, fullResolveCDDL)
 import Codec.CBOR.Cuddle.Huddle (
@@ -49,7 +50,7 @@ import Codec.CBOR.Cuddle.Huddle (
   (=:~),
  )
 import Codec.CBOR.Cuddle.Huddle qualified as H
-import Codec.CBOR.Cuddle.IndexMappable (mapCDDLDropExt, mapIndex)
+import Codec.CBOR.Cuddle.IndexMappable (mapIndex)
 import Codec.CBOR.Cuddle.Parser (pCDDL)
 import Codec.CBOR.Pretty (prettyHexEnc)
 import Codec.CBOR.Term (Term (..), encodeTerm)
@@ -108,7 +109,7 @@ validateCBOR_ ::
   BS.ByteString ->
   Name ->
   CTreeRoot ValidatorPhase ->
-  Evidenced ValidationTrace
+  Evidenced (StepTrace TermBlock)
 validateCBOR_ bs n cddl = either (\e -> error $ "validateCBOR failed:\n" <> show e) id $ validateCBOR bs n cddl
 
 -- | Test that a specific rule in a resolved CDDL generates valid values
@@ -274,7 +275,7 @@ validateHuddle ::
   Huddle ->
   Name ->
   Term ->
-  Evidenced ValidationTrace
+  Evidenced (StepTrace TermBlock)
 validateHuddle huddle name term = do
   let
     resolvedCddl = case fullResolveCDDL . mapCDDLDropExt $ toCDDL huddle of
@@ -283,18 +284,18 @@ validateHuddle huddle name term = do
     bs = toStrictByteString $ encodeTerm term
   validateCBOR_ bs name (mapIndex resolvedCddl)
 
-expectValid :: Evidenced ValidationTrace -> Expectation
+expectValid :: Evidenced (StepTrace TermBlock) -> Expectation
 expectValid (Evidenced SValid _) = pure ()
 expectValid (Evidenced SInvalid t) =
   expectationFailure . T.unpack $
     "Expected a success, got failure:\n"
-      <> renderStrict (layoutPretty defaultLayoutOptions $ prettyValidationTrace defaultTraceOptions t)
+      <> renderStrict (layoutPretty defaultLayoutOptions $ prettyStepTrace defaultTraceOptions t)
 
-expectInvalid :: Evidenced ValidationTrace -> Expectation
+expectInvalid :: Evidenced (StepTrace TermBlock) -> Expectation
 expectInvalid (Evidenced SValid t) =
   expectationFailure . T.unpack $
     "Expected a failure, but got success:\n"
-      <> renderStrict (layoutPretty defaultLayoutOptions $ prettyValidationTrace defaultTraceOptions t)
+      <> renderStrict (layoutPretty defaultLayoutOptions $ prettyStepTrace defaultTraceOptions t)
 expectInvalid _ = pure ()
 
 stringValidator :: TermValidator

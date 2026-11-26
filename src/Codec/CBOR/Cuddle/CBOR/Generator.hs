@@ -78,7 +78,9 @@ import Codec.CBOR.Cuddle.CDDL.Custom.Generator qualified as Gen
 import Codec.CBOR.Cuddle.CDDL.Custom.Validator (
   Evidenced (..),
   SValidity (..),
+  ValidateEnv (..),
   ValidatorPhase,
+  runValidator,
  )
 import Codec.CBOR.Cuddle.CDDL.Phase (showSimple)
 import Codec.CBOR.Cuddle.CDDL.Resolve (XXCTree (..))
@@ -475,9 +477,11 @@ genForCTree node = case node of
 
 isInvalidAgainstNode :: CTreeRoot GenPhase -> Term -> CTree GenPhase -> Bool
 isInvalidAgainstNode cTreeRoot term node =
-  case validateTerm (mapIndex cTreeRoot) term $ mapIndex node of
+  case runValidator (validateTerm term (mapIndex node)) env of
     Evidenced SValid _ -> False
     Evidenced SInvalid _ -> True
+  where
+    env = ValidateEnv (mapIndex cTreeRoot) mempty
 
 -- | Generate a map from a list of nodes
 genMap ::
