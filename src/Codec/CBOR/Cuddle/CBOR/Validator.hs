@@ -13,42 +13,16 @@ module Codec.CBOR.Cuddle.CBOR.Validator (
   ValidateCBORError (..),
 ) where
 
-import Codec.CBOR.Cuddle.CBOR.Canonical (CanonicalTerm, toCanonical)
 import Codec.CBOR.Cuddle.CDDL hiding (CDDL, Group, Rule)
 import Codec.CBOR.Cuddle.CDDL.CTree
 import Codec.CBOR.Cuddle.CDDL.CtlOp
 import Codec.CBOR.Cuddle.CDDL.Custom.Core (MonadCddl (..), RuleTerm (..))
-import Codec.CBOR.Cuddle.CDDL.Custom.Validator (
-  Block (..),
-  Evidenced (..),
-  SValidity (..),
-  StepTrace,
-  ValidateEnv (..),
-  ValidationTrace (..),
-  Validator,
-  ValidatorPhase,
-  ValidatorT,
-  XXCTree (..),
-  accept,
-  controlVerdict,
-  element,
-  evidence,
-  failWith,
-  mapTrace,
-  measureProgress,
-  reject,
-  runBlock,
-  runValidator,
-  withArray,
-  withChoice,
-  withTag,
- )
+import Codec.CBOR.Cuddle.CDDL.Custom.Validator
 import Codec.CBOR.Cuddle.CDDL.Phase (showSimple)
 import Codec.CBOR.Cuddle.IndexMappable (IndexMappable (..))
 import Codec.CBOR.Read
 import Codec.CBOR.Term
-import Control.Applicative (Alternative (..), optional)
-import Control.Monad (void)
+import Control.Applicative (optional)
 import Data.Bits hiding (And)
 import Data.ByteString qualified as BS
 import Data.ByteString.Lazy qualified as BSL
@@ -59,8 +33,6 @@ import Data.List (maximumBy)
 import Data.List.NonEmpty qualified as NE
 import Data.Map.Strict qualified as Map
 import Data.Maybe
-import Data.Set (Set)
-import Data.Set qualified as Set
 import Data.Text qualified as T
 import Data.Text.Encoding (encodeUtf8)
 import Data.Text.Lazy qualified as TL
@@ -144,9 +116,6 @@ validateTerm term rule
         THalf h -> validateHalf h rule
         TFloat h -> validateFloat h rule
         TDouble d -> validateDouble d rule
-
-unapplicable :: CTree ValidatorPhase -> Evidenced (ValidationTrace TermBlock)
-unapplicable = evidence . UnapplicableRule . mapIndex
 
 --------------------------------------------------------------------------------
 -- Ints and integers
@@ -759,17 +728,6 @@ validateTagged tag term rule =
 -- --------------------------------------------------------------------------------
 -- -- Lists
 
-isWithinBoundsInclusive :: Ord a => a -> Maybe a -> Maybe a -> Bool
-isWithinBoundsInclusive x lb ub = maybe True (x >=) lb && maybe True (x <=) ub
-
-isOptional :: CTree i -> Bool
-isOptional (Occur _ oi) = case oi of
-  OIOptional -> True
-  OIZeroOrMore -> True
-  OIBounded lb ub -> isWithinBoundsInclusive 0 lb ub
-  _ -> False
-isOptional _ = False
-
 data BoundPlacement
   = BelowBounds
   | WithinBounds
@@ -785,11 +743,9 @@ boundPlacement x (Nothing, Just hi) bounds
   | range bounds x hi = WithinBounds
   | otherwise = AboveBounds
 
-decrementBounds :: (Maybe Word64, Maybe Word64) -> OccurrenceIndicator
-decrementBounds (lb, ub) = OIBounded (clampedPred <$> lb) (clampedPred <$> ub)
-  where
-    clampedPred 0 = 0
-    clampedPred x = pred x
+clampedPred :: (Eq a, Num a, Enum a) => a -> a
+clampedPred 0 = 0
+clampedPred x = pred x
 
 validateList ::
   [Term] ->
@@ -804,7 +760,7 @@ validateList terms rule =
       res <- matchSeq rules terms
       case res of
         [] -> pure ()
-        (t : ts) -> do
+        t : ts -> do
           closest <- closestMatch t
           failWith $ ArrayLeftoverTerms (t NE.:| ts) closest
       where
@@ -863,12 +819,8 @@ validateList terms rule =
         withinBounds = lo == 0
         canConsumeMore = maybe True (> 0) mHi
 
-        safePred :: Word64 -> Word64
-        safePred 0 = 0
-        safePred x = pred x
-
-        newLo = safePred lo
-        newHi = safePred <$> mHi
+        newLo = clampedPred lo
+        newHi = clampedPred <$> mHi
 
     matchSeq :: [CTree ValidatorPhase] -> [Term] -> ValidatorT ListBlock [Term]
     matchSeq [] ts = pure ts
@@ -896,79 +848,73 @@ validateMap terms (CTreeE (VRuleRef n)) = validateMap terms =<< dereference n
 validateMap terms (CTreeE (VValidator v _)) = v $ SingleTerm $ TMap terms
 validateMap terms rule =
   case rule of
-    Postlude PTAny -> terminal rule
-    Map rules -> mapTrace MapTrace $ validate [] terms rules mempty
-    Choice opts -> validateChoice (validateMap cddl terms) opts
-    _ -> unapplicable rule
+    Postlude PTAny -> accept rule
+    Map rules -> withMap $ do
+      res <- matchSeq [] rules terms
+      case res of
+        [] -> pure ()
+        t : ts -> do
+          closest <- closestMatch
+          failWith $ MapLeftoverEntries (t NE.:| ts) closest
+    Choice opts -> validateChoice (validateMap terms) opts
+    _ -> reject rule
   where
-    validate ::
+    matchSingle ::
+      CTree ValidatorPhase ->
+      [(Term, Term)] ->
+      ValidatorT MapBlock [(Term, Term)]
+    matchSingle r [] = failWith $ MapUnappliedRules $ mapIndex r NE.:| []
+    matchSingle r ts@((k, v) : tt) = case r of
+      CTreeE (VRuleRef n) -> do
+        r' <- dereference n
+        matchSingle r' ts
+      CTreeE (VValidator _ _) ->
+        error
+          "Custom validators not supported for individual map entries. Write a custom validator for the map instead"
+      KV kr vr _ -> do
+        entry (validateTerm k kr) (validateTerm v vr)
+        pure tt
+      Group rules -> matchSeq [] rules ts
+      _ -> error "Unsupported rule in map"
+
+    matchSeq ::
+      [CTree ValidatorPhase] ->
       [CTree ValidatorPhase] ->
       [(Term, Term)] ->
-      [CTree ValidatorPhase] ->
-      Set CanonicalTerm ->
-      Evidenced (ValidationTrace MapBlock)
-    validate _ [] [] _ = evidence MapValidationDone
-    validate exhausted (kv : _) [] _ =
-      let
-        unwrapOccur (Occur ct _) = ct
-        unwrapOccur ct = ct
-        attempts =
-          [ (mapIndex r, MapValidationInvalidValue (mapIndex r) kTrc vTrc)
-          | r <- exhausted
-          , KV k v _ <- [unwrapOccur r]
-          , Evidenced SValid kTrc <- [validateTerm cddl (fst kv) k]
-          , Evidenced SInvalid vTrc <- [validateTerm cddl (snd kv) v]
-          , measureProgress (MapValidationInvalidValue (mapIndex r) kTrc vTrc) > mempty
-          ]
-        bestAttempt = case attempts of
-          [] -> Nothing
-          _ -> Just $ maximumBy (compare `on` (measureProgress . snd)) attempts
-       in
-        evidence $ MapValidationLeftoverKVs kv bestAttempt
-    validate [] [] rs _ =
-      case NE.nonEmpty $ filter (not . isOptional) rs of
-        Nothing -> evidence MapValidationDone
-        Just requiredRules -> evidence $ MapValidationUnappliedRules (mapIndex <$> requiredRules)
-    validate exhausted kvs (r : rs) seen =
-      let
-        consume (KV k v _) f = case kvs of
-          ((tk, tv) : leftover) ->
-            let
-              cKey = toCanonical tk
-             in
-              case validateTerm cddl tk k of
-                Evidenced SValid kTrc
-                  | cKey `Set.notMember` seen ->
-                      case validateTerm cddl tv v of
-                        Evidenced SValid vTrc -> mapTrace (MapValidationConsume (mapIndex r) kTrc vTrc) $ f leftover (Set.insert cKey seen)
-                        Evidenced SInvalid vTrc -> evidence $ MapValidationInvalidValue (mapIndex r) kTrc vTrc
-                  | otherwise -> evidence $ MapValidationDuplicateKeys (mapIndex r) cKey kTrc
-                Evidenced SInvalid _ -> evidence $ MapValidationUnappliedRules (NE.singleton $ mapIndex r)
-          [] -> error "No remaining KV pairs"
-        consume x _ = error $ "Unexpected value in map: " <> showSimple x
-        postponeRule l = validate (r : exhausted) l rs
-        dropRule l = validate exhausted l rs
-        resetDropRule l = validate [] l (exhausted <> rs)
-        rewriteRule newRule l = validate [] l (newRule : exhausted <> rs)
-       in
-        case r of
-          Occur ct oi ->
-            case oi of
-              OIOptional ->
-                consume ct resetDropRule <> postponeRule kvs seen
-              OIZeroOrMore ->
-                consume ct (rewriteRule r) <> postponeRule kvs seen
-              OIOneOrMore ->
-                consume ct (rewriteRule (Occur ct OIZeroOrMore)) <> postponeRule kvs seen
-              OIBounded mlb mub
-                | Just lb <- mlb, Just ub <- mub, lb > ub -> error "Unsatisfiable range encountered"
-                | otherwise -> case compare 0 <$> mub of
-                    Just EQ -> dropRule kvs seen
-                    Just GT -> error "Unsatisfiable range encountered"
-                    _ ->
-                      consume ct (rewriteRule (Occur ct $ decrementBounds (mlb, mub)))
-                        <> postponeRule kvs seen
-          _ -> consume r resetDropRule <> postponeRule kvs seen
+      ValidatorT MapBlock [(Term, Term)]
+    matchSeq _ [] ts = pure ts
+    matchSeq tried (curRule : remaining) ts =
+      case curRule of
+        Occur ct oi -> case oi of
+          OIOptional -> do
+            res <- optional $ matchSingle ct ts
+            resetWith Nothing $ fromMaybe ts res
+          OIZeroOrMore -> do
+            res <- optional $ matchSingle ct ts
+            resetWith (Just curRule) $ fromMaybe ts res
+          OIOneOrMore -> do
+            remainingTerms <- matchSingle ct ts
+            resetWith (Just $ Occur ct OIZeroOrMore) remainingTerms
+          OIBounded mlb mub
+            | maybe False (> 0) mlb -> do
+                remainingTerms <- matchSingle ct ts
+                resetWith (Just newBounds) remainingTerms
+            | maybe True (> 0) mub -> do
+                res <- optional $ matchSingle ct ts
+                case res of
+                  Just remainingTerms -> resetWith (Just newBounds) remainingTerms
+                  Nothing -> resetWith Nothing ts
+            | otherwise -> resetWith Nothing ts
+            where
+              newBounds = Occur ct $ OIBounded (clampedPred <$> mlb) (clampedPred <$> mub)
+        _ -> do
+          res <- optional $ matchSingle curRule ts
+          case res of
+            Just remainingTerms -> resetWith Nothing remainingTerms
+            Nothing -> continue
+      where
+        resetWith newRule = matchSeq [] (reverse tried <> maybeToList newRule <> remaining)
+        continue = matchSeq (curRule : tried) remaining ts
 
 --------------------------------------------------------------------------------
 -- Choices

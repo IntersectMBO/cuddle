@@ -29,8 +29,10 @@ module Codec.CBOR.Cuddle.CDDL.Custom.Validator (
   withChoice,
   withTag,
   withArray,
+  withMap,
   controlVerdict,
   element,
+  entry,
   runBlock,
 
   -- * Trace
@@ -122,7 +124,7 @@ instance MonadCddl (ValidatorT b) where
     binds <- asks veLocal
     pure $ Map.lookup (Name t) binds
 
-instance MonadFail Validator where
+instance MonadFail (ValidatorT b) where
   fail msg = failWith $ CustomFailure $ T.pack msg
 
 instance Alternative (ValidatorT b) where
@@ -181,11 +183,23 @@ withTag t = wrapBlock $ TagTrace t
 withArray :: ValidatorT ListBlock () -> Validator ()
 withArray = wrapBlock ArrayTrace
 
+withMap :: ValidatorT MapBlock () -> Validator ()
+withMap = wrapBlock MapTrace
+
 element :: Validator () -> ValidatorT ListBlock ()
 element m =
   runBlock m >>= \case
     Right (_, trc) -> pushStep $ ArrayElement trc
     Left trc -> failWith $ ArrayMissingRequired trc
+
+entry :: Validator () -> Validator () -> ValidatorT MapBlock ()
+entry mk mv =
+  runBlock mk >>= \case
+    Right (_, kTrc) ->
+      runBlock mv >>= \case
+        Right (_, vTrc) -> pushStep $ MapEntry kTrc vTrc
+        Left trc -> failWith $ MapInvalidValue kTrc trc
+    Left trc -> failWith $ MapInvalidKey trc
 
 controlVerdict :: CtlOp -> CTree ValidatorPhase -> Bool -> Validator ()
 controlVerdict op ctrl = \case
@@ -380,23 +394,23 @@ data ValidationTrace (b :: Block) (v :: Validity) where
     ValidationTrace ListBlock v
   MapTrace :: StepTrace MapBlock v -> ValidationTrace TermBlock v
   MapEntry ::
-    CTree MonoSimplePhase ->
     StepTrace TermBlock IsValid ->
     StepTrace TermBlock IsValid ->
     ValidationTrace MapBlock IsValid
+  MapInvalidKey ::
+    StepTrace TermBlock IsInvalid ->
+    ValidationTrace MapBlock IsInvalid
   MapInvalidValue ::
-    CTree MonoSimplePhase ->
     StepTrace TermBlock IsValid ->
     StepTrace TermBlock IsInvalid ->
     ValidationTrace MapBlock IsInvalid
   MapDuplicateKeys ::
-    CTree MonoSimplePhase ->
     CanonicalTerm ->
     StepTrace TermBlock IsValid ->
     ValidationTrace MapBlock IsInvalid
   MapUnappliedRules :: NonEmpty (CTree MonoSimplePhase) -> ValidationTrace MapBlock IsInvalid
   MapLeftoverEntries ::
-    (Term, Term) ->
+    NonEmpty (Term, Term) ->
     Maybe (CTree MonoSimplePhase, StepTrace MapBlock IsInvalid) ->
     ValidationTrace MapBlock IsInvalid
 
@@ -423,6 +437,7 @@ instance IsValidationTrace (ValidationTrace b) where
     ArrayConsumeGroup _ x -> traceValidity x
     MapTrace x -> traceValidity x
     MapEntry {} -> SValid
+    MapInvalidKey {} -> SInvalid
     MapInvalidValue {} -> SInvalid
     MapDuplicateKeys {} -> SInvalid
     MapUnappliedRules {} -> SInvalid
@@ -449,9 +464,10 @@ instance IsValidationTrace (ValidationTrace b) where
     ArrayMissingRequired {} -> mempty
     ArrayConsumeGroup ns x -> Progress 0 (length ns) <> measureProgress x
     MapTrace x -> increaseTermProgress $ measureProgress x
-    MapEntry _ k v -> measureProgress k <> measureProgress v
-    MapInvalidValue _ k v -> measureProgress k <> measureProgress v
-    MapDuplicateKeys _ _ x -> measureProgress x
+    MapEntry k v -> measureProgress k <> measureProgress v
+    MapInvalidKey k -> measureProgress k
+    MapInvalidValue k v -> measureProgress k <> measureProgress v
+    MapDuplicateKeys _ x -> measureProgress x
     MapUnappliedRules {} -> mempty
     MapLeftoverEntries _ Nothing -> mempty
     MapLeftoverEntries _ (Just (_, x)) -> measureProgress x
@@ -584,21 +600,26 @@ prettyValidationTrace opts = \case
         [ annotate (color Red) "not all required rules have been applied:"
         , vsep (NE.toList $ pretty <$> rs)
         ]
-  MapEntry _ k v ->
+  MapEntry k v ->
     vsep
       [ "key:"
       , nestContainer $ prettyStepTrace True opts k
       , "value:"
       , nestContainer $ prettyStepTrace True opts v
       ]
-  MapInvalidValue _ k v ->
+  MapInvalidKey k ->
+    vsep
+      [ "key:" <+> annotate (color Red) "(fail)"
+      , nestContainer $ prettyStepTrace False opts k
+      ]
+  MapInvalidValue k v ->
     vsep
       [ "key:"
       , nestContainer $ prettyStepTrace False opts k
       , "value:" <+> annotate (color Red) "(fail)"
-      , nestContainer $ prettyStepTrace True opts v
+      , nestContainer $ prettyStepTrace False opts v
       ]
-  MapDuplicateKeys _ _ trc ->
+  MapDuplicateKeys _ trc ->
     vsep
       [ "key: " <> annotate (color Red) "(duplicate)"
       , nestContainer $ prettyStepTrace False opts trc
