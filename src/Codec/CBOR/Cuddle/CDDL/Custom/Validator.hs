@@ -406,7 +406,6 @@ data ValidationTrace (b :: Block) (v :: Validity) where
     ValidationTrace MapBlock IsInvalid
   MapDuplicateKeys ::
     CanonicalTerm ->
-    StepTrace TermBlock IsValid ->
     ValidationTrace MapBlock IsInvalid
   MapUnappliedRules :: NonEmpty (CTree MonoSimplePhase) -> ValidationTrace MapBlock IsInvalid
   MapLeftoverEntries ::
@@ -467,7 +466,7 @@ instance IsValidationTrace (ValidationTrace b) where
     MapEntry k v -> measureProgress k <> measureProgress v
     MapInvalidKey k -> measureProgress k
     MapInvalidValue k v -> measureProgress k <> measureProgress v
-    MapDuplicateKeys _ x -> measureProgress x
+    MapDuplicateKeys x -> measureProgress x
     MapUnappliedRules {} -> mempty
     MapLeftoverEntries _ Nothing -> mempty
     MapLeftoverEntries _ (Just (_, x)) -> measureProgress x
@@ -619,10 +618,9 @@ prettyValidationTrace opts = \case
       , "value:" <+> annotate (color Red) "(fail)"
       , nestContainer $ prettyStepTrace False opts v
       ]
-  MapDuplicateKeys _ trc ->
+  MapDuplicateKeys _ ->
     vsep
       [ "key: " <> annotate (color Red) "(duplicate)"
-      , nestContainer $ prettyStepTrace False opts trc
       ]
   where
     prettyGroup :: [Name] -> StepTrace ListBlock v -> [Doc AnsiStyle]

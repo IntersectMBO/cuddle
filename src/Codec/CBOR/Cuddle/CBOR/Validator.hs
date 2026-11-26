@@ -13,6 +13,7 @@ module Codec.CBOR.Cuddle.CBOR.Validator (
   ValidateCBORError (..),
 ) where
 
+import Codec.CBOR.Cuddle.CBOR.Canonical (toCanonical)
 import Codec.CBOR.Cuddle.CDDL hiding (CDDL, Group, Rule)
 import Codec.CBOR.Cuddle.CDDL.CTree
 import Codec.CBOR.Cuddle.CDDL.CtlOp
@@ -35,6 +36,7 @@ import Data.List (maximumBy)
 import Data.List.NonEmpty qualified as NE
 import Data.Map.Strict qualified as Map
 import Data.Maybe
+import Data.Set qualified as Set
 import Data.Text qualified as T
 import Data.Text.Encoding (encodeUtf8)
 import Data.Text.Lazy qualified as TL
@@ -852,6 +854,7 @@ validateMap terms rule =
   case rule of
     Postlude PTAny -> accept rule
     Map rules -> withMap $ do
+      checkDuplicates $ toCanonical . fst <$> terms
       res <- matchSeq [] rules terms
       case res of
         [] -> pure ()
@@ -861,6 +864,13 @@ validateMap terms rule =
     Choice opts -> validateChoice (validateMap terms) opts
     _ -> reject rule
   where
+    checkDuplicates = go mempty
+      where
+        go _ [] = pure ()
+        go seen (k : ts)
+          | k `Set.member` seen = failWith $ MapDuplicateKeys k
+          | otherwise = go (Set.insert k seen) ts
+
     matchSingle ::
       CTree ValidatorPhase ->
       [(Term, Term)] ->
