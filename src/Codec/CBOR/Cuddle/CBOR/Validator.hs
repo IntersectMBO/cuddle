@@ -19,18 +19,17 @@ import Codec.CBOR.Cuddle.CDDL.CTree
 import Codec.CBOR.Cuddle.CDDL.CtlOp
 import Codec.CBOR.Cuddle.CDDL.Custom.Core (MonadCddl (..), RuleTerm (..))
 import Codec.CBOR.Cuddle.CDDL.Custom.Validator
-import Codec.CBOR.Cuddle.CDDL.Phase (showSimple)
+import Codec.CBOR.Cuddle.CDDL.Phase (MonoSimplePhase, showSimple)
 import Codec.CBOR.Cuddle.IndexMappable (IndexMappable (..))
 import Codec.CBOR.Read
 import Codec.CBOR.Term
 import Control.Applicative (Alternative (..), optional)
-import Control.Monad (filterM)
+import Control.Monad (filterM, void)
 import Data.Bits hiding (And)
 import Data.ByteString qualified as BS
 import Data.ByteString.Lazy qualified as BSL
-import Data.Foldable (Foldable (..), asum, foldrM)
+import Data.Foldable (Foldable (..), asum)
 import Data.Function (on)
-import Data.Functor (($>))
 import Data.IntSet qualified as IS
 import Data.List (maximumBy)
 import Data.List.NonEmpty qualified as NE
@@ -751,6 +750,18 @@ clampedPred :: (Eq a, Num a, Enum a) => a -> a
 clampedPred 0 = 0
 clampedPred x = pred x
 
+closestMatch ::
+  (CTree ValidatorPhase -> ValidatorT b' ()) ->
+  [CTree ValidatorPhase] ->
+  ValidatorT b (Maybe (CTree MonoSimplePhase, StepTrace b' IsInvalid))
+closestMatch tryRule candidates = do
+  results <- traverse (\r -> (mapIndex r,) <$> runBlock (tryRule $ unwrapOccur r)) candidates
+  pure . fmap (maximumBy (compare `on` (measureProgress . snd))) . NE.nonEmpty $
+    [(r, trc) | (r, Left trc) <- results, measureProgress trc > mempty]
+  where
+    unwrapOccur (Occur ct _) = ct
+    unwrapOccur ct = ct
+
 validateList ::
   [Term] ->
   CTree ValidatorPhase ->
@@ -765,29 +776,8 @@ validateList terms rule =
       case res of
         [] -> pure ()
         t : ts -> do
-          closest <- closestMatch t
+          closest <- closestMatch (validateTerm t) . reverse $ [r | r@Occur {} <- rules]
           failWith $ ArrayLeftoverTerms (t NE.:| ts) closest
-      where
-        candidates = reverse [r | r@Occur {} <- rules]
-
-        unwrapOccur (Occur ct _) = ct
-        unwrapOccur ct = ct
-
-        tryCandidate t r = do
-          res <- runBlock . validateTerm t $ unwrapOccur r
-          pure (mapIndex r, res)
-
-        closestMatch t = do
-          results <- traverse (tryCandidate t) candidates
-          let
-            attempts =
-              [ (r, trc)
-              | (r, Left trc) <- results
-              , measureProgress trc > mempty
-              ]
-          pure $ case attempts of
-            [] -> Nothing
-            _ -> Just $ maximumBy (compare `on` (measureProgress . snd)) attempts
     Choice opts -> validateChoice (validateList terms) opts
     _ -> reject rule
   where
@@ -855,12 +845,8 @@ validateMap terms rule =
     Postlude PTAny -> accept rule
     Map rules -> withMap $ do
       checkDuplicates $ toCanonical . fst <$> terms
-      res <- matchSeq [] rules terms
-      case res of
-        [] -> pure ()
-        t : ts -> do
-          closest <- closestMatch
-          failWith $ MapLeftoverEntries (t NE.:| ts) closest
+      _ <- matchSeq [] rules terms
+      pure ()
     Choice opts -> validateChoice (validateMap terms) opts
     _ -> reject rule
   where
@@ -923,7 +909,9 @@ validateMap terms rule =
       case unappliedRules of
         [] -> pure []
         x : xs -> failWith $ MapUnappliedRules $ mapIndex <$> x NE.:| xs
-    matchSeq _ [] (t : ts) = failWith $ MapLeftoverEntries (t NE.:| ts) Nothing
+    matchSeq tried [] (t : ts) =
+      failWith . MapLeftoverEntries (t NE.:| ts)
+        =<< closestMatch (\r -> void $ matchSingle r [t]) (reverse tried)
     matchSeq tried (r : rs) ts =
       ( do
           (rest, r') <- consumeOne r ts
