@@ -23,9 +23,6 @@ module Codec.CBOR.Cuddle.CBOR.Generator (
   twiddleMap,
   twiddleText,
   twiddleBytes,
-  evalDouble,
-  evalInteger,
-  evalArray,
 
   -- * Generator helpers
   genNBytes,
@@ -60,7 +57,13 @@ import Codec.CBOR.Cuddle.CDDL.CTree (
  )
 import Codec.CBOR.Cuddle.CDDL.CTree qualified as CTree
 import Codec.CBOR.Cuddle.CDDL.CtlOp qualified as CtlOp
-import Codec.CBOR.Cuddle.CDDL.Custom.Core (MonadCddl (..), RuleTerm (..))
+import Codec.CBOR.Cuddle.CDDL.Custom.Core (
+  MonadCddl (..),
+  RuleTerm (..),
+  evalDouble,
+  evalInteger,
+  evalInterval,
+ )
 import Codec.CBOR.Cuddle.CDDL.Custom.Generator (
   CBORGen,
   GenConfig (..),
@@ -87,7 +90,6 @@ import Codec.CBOR.Cuddle.CDDL.Resolve (XXCTree (..))
 import Codec.CBOR.Cuddle.IndexMappable (IndexMappable (..))
 import Codec.CBOR.Cuddle.Interval (
   Interval (..),
-  IntervalBound (..),
   greaterThanOrEqual,
   intersect,
   lessThanOrEqual,
@@ -106,7 +108,7 @@ import Data.Char (chr)
 import Data.Functor ((<&>))
 import Data.List (sortOn)
 import Data.List.NonEmpty qualified as NE
-import Data.Maybe (fromMaybe)
+import Data.Maybe (fromJust, fromMaybe)
 import Data.Ord (Down (..))
 import Data.Set qualified as Set
 import Data.Text (Text)
@@ -117,7 +119,7 @@ import Data.Text.Lazy qualified as TL
 import Data.Text.Lazy.Builder (toLazyText)
 import Data.Text.Lazy.Builder qualified as LB
 import Data.Word (Word64, Word8)
-import GHC.Float (double2Float, float2Double)
+import GHC.Float (double2Float)
 import GHC.Stack (HasCallStack)
 import Numeric.Half (fromHalf, toHalf)
 import System.Random.Stateful (Random, StatefulGen (..), runStateGen_, uniformByteStringM)
@@ -205,13 +207,13 @@ genHalf = go universe mempty
         , tgConstrain = \case
             Gen.Range cRng -> Just $ deferGen $ do
               -- TODO think about the edges
-              rng' <- forM cRng $ fmap double2Float . evalDouble
+              rng' <- forM cRng $ fmap (double2Float . fromJust) . evalDouble
               pure $ go (rng `intersect` rng') exclude
             Gen.Eq term -> Just $ deferGen $ do
-              x <- evalDouble term
+              x <- fromJust <$> evalDouble term
               pure $ go (rng `intersect` Interval.singleton (double2Float x)) exclude
             Gen.Neq term -> Just $ deferGen $ do
-              x <- evalDouble term
+              x <- fromJust <$> evalDouble term
               pure $ go rng $ Set.insert (double2Float x) exclude
             _ -> Nothing
         }
@@ -290,7 +292,7 @@ genBytes = go Nothing $ greaterThanOrEqual 0
                   _ -> error "Expected a single term"
         , tgConstrain = \case
             Gen.Size rngRule -> Just $ deferGen $ do
-              newRange <- evalInterval evalInteger rngRule
+              newRange <- fromJust <$> evalInterval evalInteger rngRule
               pure $ go mCbor $ szRange `intersect` fmap fromIntegral newRange
             Gen.Cbor cbor
               -- Only allow constraining with .cbor once
@@ -327,7 +329,7 @@ genText = go $ greaterThanOrEqual 0
             genNBytesText n
         , tgConstrain = \case
             Gen.Size rngRule -> Just $ deferGen $ do
-              newRange <- evalInterval evalInteger rngRule
+              newRange <- fromJust <$> evalInterval evalInteger rngRule
               pure . go $ sizeRange `intersect` fmap fromIntegral newRange
             _ -> Nothing
         }
@@ -367,16 +369,16 @@ genInteger validRng invalidRng = go validRng mempty
             rangeInInterval invalidRng validInterval `suchThat` (`Set.notMember` excluded)
         , tgConstrain = \case
             Gen.Size szRule -> Just $ deferGen $ do
-              sz <- evalInteger szRule
+              sz <- fromJust <$> evalInteger szRule
               pure $ go (validInterval `intersect` lessThanOrEqual (2 ^ sz)) excluded
             Gen.Range intRule -> Just $ deferGen $ do
-              int <- traverse evalInteger intRule
+              int <- traverse (fmap fromJust . evalInteger) intRule
               pure $ go (validInterval `intersect` int) excluded
             Gen.Eq r -> Just $ deferGen $ do
-              x <- evalInteger r
+              x <- fromJust <$> evalInteger r
               pure $ go (validInterval `intersect` Interval.singleton x) excluded
             Gen.Neq r -> Just $ deferGen $ do
-              x <- evalInteger r
+              x <- fromJust <$> evalInteger r
               pure $ go validInterval $ Set.insert x excluded
             _ -> Nothing
         }
@@ -662,49 +664,6 @@ genRange from to bounds = do
     (SingleTerm (TDouble a), SingleTerm (TDouble b))
       | a <= b -> choose (range bounds a b) <&> SingleTerm . TDouble
     (a, b) -> error $ "invalid range (a = " <> show a <> ", b = " <> show b <> ")"
-
-evalDouble :: CTree GenPhase -> CBORGen Double
-evalDouble = \case
-  Literal (Value var _)
-    | VFloat16 x <- var -> pure $ float2Double x
-    | VFloat32 x <- var -> pure $ float2Double x
-    | VFloat64 x <- var -> pure x
-  CTreeE (GenGenerator _ t) -> evalDouble t
-  CTreeE (GenValidator _ t) -> evalDouble t
-  CTreeE (GenRef n) -> evalDouble =<< resolveRef n
-  _ -> error "Expected double"
-
-evalInteger :: CTree GenPhase -> CBORGen Integer
-evalInteger = \case
-  Literal (Value var _)
-    | VUInt x <- var -> pure $ toInteger x
-    | VNInt x <- var -> pure . negate $ toInteger x
-    | VBignum x <- var -> pure x
-  CTreeE (GenGenerator _ t) -> evalInteger t
-  CTreeE (GenValidator _ t) -> evalInteger t
-  CTreeE (GenRef n) -> evalInteger =<< resolveRef n
-  _ -> error "Expected integer"
-
-evalArray :: (CTree GenPhase -> CBORGen a) -> CTree GenPhase -> CBORGen [a]
-evalArray f = \case
-  Array es -> traverse f es
-  CTreeE (GenGenerator _ t) -> evalArray f t
-  CTreeE (GenValidator _ t) -> evalArray f t
-  CTreeE (GenRef n) -> evalArray f =<< resolveRef n
-  _ -> error "Expected array"
-
-evalInterval :: (CTree GenPhase -> CBORGen a) -> CTree GenPhase -> CBORGen (Interval a)
-evalInterval f = \case
-  Range loRule hiRule bound -> do
-    lo <- f loRule
-    hi <- f hiRule
-    pure $ Interval (ClosedBound lo) $ case bound of
-      ClOpen -> OpenBound hi
-      Closed -> ClosedBound hi
-  CTreeE (GenGenerator _ t) -> evalInterval f t
-  CTreeE (GenValidator _ t) -> evalInterval f t
-  CTreeE (GenRef n) -> evalInterval f =<< resolveRef n
-  x -> Interval.singleton <$> f x
 
 -- | Generate a value with a control operator applied
 genControl ::

@@ -128,6 +128,10 @@ instance MonadCddl (ValidatorT b) where
     binds <- asks veLocal
     pure $ Map.lookup (Name t) binds
 
+  resolveExt = \case
+    VValidator _ x -> pure $ Just x
+    VRuleRef n -> lookupCddl n
+
 instance MonadFail (ValidatorT b) where
   fail msg = failWith $ CustomFailure $ T.pack msg
 

@@ -95,6 +95,11 @@ instance MonadCddl CBORGen where
     binds <- asks geLocal
     pure $ Map.lookup (Name t) binds
 
+  resolveExt = \case
+    GenValidator _ x -> pure $ Just x
+    GenGenerator _ x -> pure $ Just x
+    GenRef n -> lookupCddl n
+
 withAntiGen :: (AntiGen a -> AntiGen b) -> CBORGen a -> CBORGen b
 withAntiGen f (CBORGen m) = CBORGen $ mapReaderT f m
 
