@@ -2,7 +2,7 @@
 
 module Test.Codec.CBOR.Cuddle.CDDL.Examples (spec) where
 
-import Codec.CBOR.Cuddle.CDDL (Value (..), ValueVariant (..))
+import Codec.CBOR.Cuddle.CDDL (Value (..), ValueVariant (..), mapCDDLDropExt)
 import Codec.CBOR.Cuddle.CDDL.CTree (CTree (..), CTreeRoot, PTerm (..))
 import Codec.CBOR.Cuddle.CDDL.Postlude (appendPostlude)
 import Codec.CBOR.Cuddle.CDDL.Resolve (
@@ -10,7 +10,6 @@ import Codec.CBOR.Cuddle.CDDL.Resolve (
   NameResolutionFailure (..),
   fullResolveCDDL,
  )
-import Codec.CBOR.Cuddle.IndexMappable (mapCDDLDropExt)
 import Codec.CBOR.Cuddle.Parser (pCDDL)
 import Data.Text.IO qualified as T
 import Paths_cuddle (getDataFileName)

@@ -6,27 +6,25 @@
 
 module Main (main) where
 
-import Codec.CBOR.Cuddle.CBOR.Gen (generateFromName)
+import Codec.CBOR.Cuddle.CBOR.Generator (generateFromName)
 import Codec.CBOR.Cuddle.CBOR.Validator
-import Codec.CBOR.Cuddle.CBOR.Validator.Trace (
-  Evidenced (..),
-  SValidity (..),
-  TraceOptions (..),
-  prettyValidationTrace,
- )
-import Codec.CBOR.Cuddle.CDDL (CDDL, Name (..), fromRules, sortCDDL)
+import Codec.CBOR.Cuddle.CDDL (CDDL, Name (..), fromRules, mapCDDLDropExt, sortCDDL)
 import Codec.CBOR.Cuddle.CDDL.CTree (CTreeRoot)
 import Codec.CBOR.Cuddle.CDDL.Custom.Generator (
   GenConfig (..),
   runCBORGen,
-  twiddleAll,
-  twiddleNothing,
+ )
+import Codec.CBOR.Cuddle.CDDL.Custom.Validator (
+  Evidenced (..),
+  SValidity (..),
+  TraceOptions (..),
+  prettyStepTrace,
  )
 import Codec.CBOR.Cuddle.CDDL.Postlude (appendPostlude)
 import Codec.CBOR.Cuddle.CDDL.Resolve (
   fullResolveCDDL,
  )
-import Codec.CBOR.Cuddle.IndexMappable (IndexMappable (..), mapCDDLDropExt)
+import Codec.CBOR.Cuddle.IndexMappable (IndexMappable (..))
 import Codec.CBOR.Cuddle.Parser (ParserStage, pCDDL)
 import Codec.CBOR.Cuddle.Pretty (PrettyStage, renderCDDL)
 import Codec.CBOR.FlatTerm (toFlatTerm)
@@ -404,10 +402,7 @@ run = \case
             | goNegative = 1
             | otherwise = 0
           cfg =
-            GenConfig
-              { gcRoot = mapIndex mt
-              , gcTwiddle = if goTwiddle then twiddleAll else twiddleNothing
-              }
+            GenConfig $ mapIndex mt
           term = runGen seed goSize . zapAntiGen zapN . runCBORGen cfg $ generateFromName (Name itemName)
           formatted = formatTerm term outputFormat
         case outputTo of
@@ -456,7 +451,7 @@ runValidateCBOR bs rule cddl traceOpts =
       exitFailure
     Right (Evidenced validity trc) -> do
       T.putStrLn . Ansi.renderStrict . layoutPretty defaultLayoutOptions $
-        prettyValidationTrace traceOpts trc
+        prettyStepTrace traceOpts trc
       putStrLn mempty
       case validity of
         SValid -> do

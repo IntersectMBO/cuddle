@@ -5,12 +5,13 @@
 
 module Main (main) where
 
-import Codec.CBOR.Cuddle.CBOR.Gen (generateFromName)
-import Codec.CBOR.Cuddle.CDDL (Name (..))
-import Codec.CBOR.Cuddle.CDDL.Custom.Generator (GenConfig (..), runCBORGen, twiddleAll)
-import Codec.CBOR.Cuddle.CDDL.Resolve (MonoSimplePhase, fullResolveCDDL)
+import Codec.CBOR.Cuddle.CBOR.Generator (generateFromName)
+import Codec.CBOR.Cuddle.CDDL (Name (..), mapCDDLDropExt)
+import Codec.CBOR.Cuddle.CDDL.Custom.Generator (GenConfig (..), runCBORGen)
+import Codec.CBOR.Cuddle.CDDL.Phase (MonoSimplePhase)
+import Codec.CBOR.Cuddle.CDDL.Resolve (fullResolveCDDL)
 import Codec.CBOR.Cuddle.Huddle (toCDDL)
-import Codec.CBOR.Cuddle.IndexMappable (IndexMappable (..), mapCDDLDropExt)
+import Codec.CBOR.Cuddle.IndexMappable (IndexMappable (..))
 import Codec.CBOR.Cuddle.Parser (pCDDL)
 import Codec.CBOR.Cuddle.Pretty (PrettyStage)
 import Conway (conway)
@@ -49,7 +50,7 @@ main = do
           case fullResolveCDDL (mapCDDLDropExt res) of
             Left nre -> error $ show nre
             Right resolved -> do
-              let cfg = GenConfig {gcRoot = mapIndex resolved, gcTwiddle = twiddleAll}
+              let cfg = GenConfig {gcRoot = mapIndex resolved}
               term <- generate . runAntiGen . runCBORGen cfg $ generateFromName (Name (T.pack name))
               print term
     [] -> do

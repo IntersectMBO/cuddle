@@ -31,7 +31,7 @@ module Test.Codec.CBOR.Cuddle.CDDL.Examples.Huddle (
   tagRangeExample,
 ) where
 
-import Codec.CBOR.Cuddle.CBOR.Gen (generateFromGRef)
+import Codec.CBOR.Cuddle.CBOR.Generator (generateFromGRef)
 import Codec.CBOR.Cuddle.CBOR.Validator (validateFromGRef)
 import Codec.CBOR.Cuddle.CDDL (Name)
 import Codec.CBOR.Cuddle.CDDL.Custom.Core (RuleTerm (..))
@@ -350,7 +350,7 @@ tagRangeExample =
             _ -> error "tagRangeExample: generic argument must be a single term"
 
         validator x = \case
-          SingleTerm (C.TTagged t inner)
+          C.TTagged t inner
             | t >= 1280 && t <= 1400 -> validateFromGRef x inner
             | otherwise -> fail $ "Tag out of range 1280..1400: " <> show t
           wt -> fail $ "Expected a tagged term, got: " <> show wt

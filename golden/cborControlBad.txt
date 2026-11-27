@@ -1,2 +1,8 @@
-[0;91munsatisfied control:
-  .cbor simpleRule[0m
+app: [0;92mbytes[0m
+ctrl: .cbor [1, 2, 3] [0;91m(failed)[0m
+└ array
+  └ app: [0;92m1[0m
+    app: [0;92m2[0m
+    [0;91mfailed to apply required rule:[0m
+    └ [0;91mfailed to apply: 
+        3[0m

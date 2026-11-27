@@ -4,13 +4,14 @@
 
 module Test.Codec.CBOR.Cuddle.CDDL.GeneratorSpec (spec) where
 
-import Codec.CBOR.Cuddle.CBOR.Gen (GenPhase, generateFromName)
-import Codec.CBOR.Cuddle.CDDL (Name)
+import Codec.CBOR.Cuddle.CBOR.Generator (GenPhase, generateFromName)
+import Codec.CBOR.Cuddle.CDDL (Name, mapCDDLDropExt)
 import Codec.CBOR.Cuddle.CDDL.CTree (CTreeRoot (..))
-import Codec.CBOR.Cuddle.CDDL.Custom.Generator (GenConfig (..), runCBORGen, twiddleAll)
-import Codec.CBOR.Cuddle.CDDL.Resolve (MonoReferenced, MonoSimplePhase, fullResolveCDDL)
+import Codec.CBOR.Cuddle.CDDL.Custom.Generator (GenConfig (..), runCBORGen)
+import Codec.CBOR.Cuddle.CDDL.Phase (MonoSimplePhase)
+import Codec.CBOR.Cuddle.CDDL.Resolve (MonoReferenced, fullResolveCDDL)
 import Codec.CBOR.Cuddle.Huddle (Huddle, toCDDL)
-import Codec.CBOR.Cuddle.IndexMappable (IndexMappable (..), mapCDDLDropExt)
+import Codec.CBOR.Cuddle.IndexMappable (IndexMappable (..))
 import Codec.CBOR.Pretty (prettyHexEnc)
 import Codec.CBOR.Read (deserialiseFromBytes)
 import Codec.CBOR.Term (Term (..), decodeTerm, encodeTerm)
@@ -40,13 +41,7 @@ import Test.QuickCheck (Gen, Property, Testable (..), classify, counterexample)
 import Text.Pretty.Simple (pShow)
 
 generateCDDL :: CTreeRoot GenPhase -> Gen Term
-generateCDDL cddl = runAntiGen . runCBORGen cfg $ generateFromName "root"
-  where
-    cfg =
-      GenConfig
-        { gcRoot = cddl
-        , gcTwiddle = twiddleAll
-        }
+generateCDDL cddl = runAntiGen . runCBORGen (GenConfig cddl) $ generateFromName "root"
 
 tryResolveHuddle :: HasCallStack => Huddle -> SpecM () (CTreeRoot MonoReferenced)
 tryResolveHuddle huddle = do
@@ -56,12 +51,7 @@ tryResolveHuddle huddle = do
 
 expectZapInvalidates :: CTreeRoot MonoReferenced -> Name -> Property
 expectZapInvalidates cddl name = property $ do
-  let
-    cfg =
-      GenConfig
-        { gcRoot = mapIndex cddl
-        , gcTwiddle = twiddleAll
-        }
+  let cfg = GenConfig $ mapIndex cddl
   res@ZapResult {zrValue} <- zapAntiGenResult 1 . runCBORGen cfg $ generateFromName name
   let
     bs = toStrictByteString $ encodeTerm zrValue
@@ -157,11 +147,7 @@ spec = do
 
   describe "Tagged bytes zapping" $ do
     taggedBytesCddl <- tryResolveHuddle taggedUintExample
-    let cfg =
-          GenConfig
-            { gcRoot = mapIndex taggedBytesCddl
-            , gcTwiddle = twiddleAll
-            }
+    let cfg = GenConfig $ mapIndex taggedBytesCddl
     prop "labels zapped result" $ do
       ZapResult {zrValue} <-
         zapAntiGenResult 1 . runCBORGen cfg $ generateFromName "root"

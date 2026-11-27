@@ -7,6 +7,7 @@
 {-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE TypeData #-}
 {-# LANGUAGE TypeFamilies #-}
+{-# OPTIONS_GHC -Wno-orphans #-}
 
 -- | Module for building CDDL in Haskell
 --
@@ -26,7 +27,6 @@ module Codec.CBOR.Cuddle.Huddle (
   Type0 (..),
 
   -- * AST extensions
-  HuddleStage,
   C.XCddl (..),
   C.XTerm (..),
   C.XRule (..),
@@ -94,9 +94,13 @@ module Codec.CBOR.Cuddle.Huddle (
 
   -- * Generators
   withCBORGen,
+  withOverrideCBORGen,
+  withGenerator,
+  withOverrideGenerator,
 
   -- * Validators
   withValidator,
+  withOverrideValidator,
 
   -- * Name
   HasName (..),
@@ -115,15 +119,27 @@ import Codec.CBOR.Cuddle.CDDL (
   GenericParameter (..),
   HasName (..),
   Name (..),
+  XCddl,
   XRule,
+  XTerm,
+  XXTopLevel,
+  XXType2,
  )
 import Codec.CBOR.Cuddle.CDDL qualified as C
 import Codec.CBOR.Cuddle.CDDL.CtlOp qualified as CtlOp
 import Codec.CBOR.Cuddle.CDDL.Custom.Core (RuleTerm)
-import Codec.CBOR.Cuddle.CDDL.Custom.Generator (CBORGen, HasGenerator (..))
+import Codec.CBOR.Cuddle.CDDL.Custom.Generator (
+  CBORGen,
+  HasGenerator (..),
+  TermGenerator (..),
+  simpleGen,
+ )
 import Codec.CBOR.Cuddle.CDDL.Custom.Validator (HasValidator (..), TermValidator)
+import Codec.CBOR.Cuddle.CDDL.Phase (HuddleStage)
 import Codec.CBOR.Cuddle.Comments (Comment, HasComment (..))
 import Codec.CBOR.Cuddle.Comments qualified as C
+import Codec.CBOR.Cuddle.IndexMappable (IndexMappable (..))
+import Codec.CBOR.Cuddle.Parser (ParserStage, XCddl (..), XTerm (..), XXTopLevel (..), XXType2 (..))
 import Control.Monad (when)
 import Control.Monad.State (MonadState (get), State, execState, modify)
 import Data.ByteString (ByteString)
@@ -147,8 +163,6 @@ import Optics.Core (lens, view, (%), (%~), (&))
 import Optics.Core qualified as L
 import Prelude hiding ((/))
 
-type data HuddleStage
-
 newtype instance C.XTerm HuddleStage = HuddleXTerm C.Comment
   deriving (Generic, Semigroup, Monoid, Show, Eq)
 
@@ -157,8 +171,8 @@ newtype instance C.XCddl HuddleStage = HuddleXCddl [C.Comment]
 
 data instance C.XRule HuddleStage = HuddleXRule
   { hxrComment :: C.Comment
-  , hxrGenerator :: Maybe (CBORGen RuleTerm)
-  , hxrValidator :: Maybe TermValidator
+  , hxrGenerator :: TermGenerator RuleTerm -> TermGenerator RuleTerm
+  , hxrValidator :: TermValidator -> TermValidator
   }
   deriving (Generic)
 
@@ -171,7 +185,8 @@ instance HasValidator (C.XRule HuddleStage) where
 instance HasGenerator (C.XRule HuddleStage) where
   generatorL = #hxrGenerator
 
-instance Default (XRule HuddleStage)
+instance Default (XRule HuddleStage) where
+  def = HuddleXRule def id id
 
 newtype instance C.XXTopLevel HuddleStage = HuddleXXTopLevel C.Comment
   deriving (Generic, Semigroup, Monoid, Show, Eq)
@@ -475,18 +490,9 @@ inferInteger i
 -- Constraints and Ranges
 --------------------------------------------------------------------------------
 
--- | A reference can be to any type, so we allow it to inhabit all
-data AnyRef = AnyRef
-  { arName :: Name
-  , arDefinition :: Type0
-  }
-
-instance HasName AnyRef where
-  getName = arName
-
 data Constrainable a
   = CValue (Value a)
-  | CRef AnyRef
+  | CRef Rule
   | CGRef GRef
 
 -- | Uninhabited type used as marker for the type of thing a CRef sizes
@@ -512,7 +518,7 @@ data Constrained where
 class IsConstrainable a x | a -> x where
   toConstrainable :: a -> Constrainable x
 
-instance IsConstrainable AnyRef CRefType where
+instance IsConstrainable Rule CRefType where
   toConstrainable = CRef
 
 instance IsConstrainable (Value a) a where
@@ -604,8 +610,8 @@ sized v sz =
 
 class IsCborable a
 instance IsCborable ByteString
-instance IsCborable AnyRef
 instance IsCborable GRef
+instance IsCborable CRefType
 
 cbor :: (IsCborable b, IsConstrainable c b) => c -> Rule -> Constrained
 cbor v r@(Rule n _ _) =
@@ -623,7 +629,6 @@ cbor v r@(Rule n _ _) =
 
 class IsComparable a
 instance IsComparable Int
-instance IsComparable AnyRef
 instance IsComparable GRef
 
 le :: (IsComparable a, IsConstrainable c a) => c -> Word64 -> Constrained
@@ -1144,7 +1149,7 @@ collectFrom topRs =
     goT2 (T2Constrained (Constrained c _ refs)) =
       ( case c of
           CValue _ -> pure ()
-          CRef AnyRef {..} -> goRule $ Rule arName arDefinition def
+          CRef rule -> goRule rule
           CGRef _ -> pure ()
       )
         >> mapM_ goRule refs
@@ -1158,7 +1163,7 @@ collectFrom topRs =
     goRanged (Unranged _) = pure ()
     goRanged (Ranged lb ub _) = goRangeBound lb >> goRangeBound ub
     goRangeBound (RangeBoundLiteral _) = pure ()
-    goRangeBound (RangeBoundRef n r) = goRule . Rule n r $ HuddleXRule mempty Nothing Nothing
+    goRangeBound (RangeBoundRef n r) = goRule . Rule n r $ HuddleXRule mempty id id
 
 -- | Same as `collectFrom`, but the rules passed into this function will be put
 --   at the top of the Huddle, and all of their dependencies will be added at
@@ -1377,10 +1382,38 @@ toCDDL' HuddleConfig {..} hdl =
           C.GenericParameters $
             fmap (\(GRef t) -> GenericParameter (C.Name t) $ HuddleXTerm mempty) (args gr)
 
--- | Use a custom `CBORGen` generator to generate the term. Will override
--- the custom generator passed via `withGenerator`.
+withGenerator :: HasGenerator a => TermGenerator RuleTerm -> a -> a
+withGenerator g = withOverrideGenerator $ const g
+
+withOverrideGenerator ::
+  HasGenerator a => (TermGenerator RuleTerm -> TermGenerator RuleTerm) -> a -> a
+withOverrideGenerator = L.set generatorL
+
+-- | Use a custom `CBORGen` generator to generate the term.
 withCBORGen :: HasGenerator a => CBORGen RuleTerm -> a -> a
-withCBORGen gen = L.set generatorL $ Just gen
+withCBORGen g = withOverrideCBORGen $ const g
+
+withOverrideCBORGen :: HasGenerator a => (CBORGen RuleTerm -> CBORGen RuleTerm) -> a -> a
+withOverrideCBORGen f = withOverrideGenerator $ simpleGen . f . tgGenerator
 
 withValidator :: HasValidator a => TermValidator -> a -> a
-withValidator p = L.set validatorL $ Just p
+withValidator p = withOverrideValidator $ const p
+
+withOverrideValidator :: HasValidator a => (TermValidator -> TermValidator) -> a -> a
+withOverrideValidator = L.set validatorL
+
+-- * IndexMappable
+
+-- ParserStage -> HuddleStage
+
+instance IndexMappable XCddl ParserStage HuddleStage where
+  mapIndex (ParserXCddl c) = HuddleXCddl c
+
+instance IndexMappable XXTopLevel ParserStage HuddleStage where
+  mapIndex (ParserXXTopLevel c) = HuddleXXTopLevel c
+
+instance IndexMappable XXType2 ParserStage HuddleStage where
+  mapIndex (ParserXXType2 c) = HuddleXXType2 c
+
+instance IndexMappable XTerm ParserStage HuddleStage where
+  mapIndex (ParserXTerm c) = HuddleXTerm c

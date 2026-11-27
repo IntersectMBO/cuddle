@@ -20,6 +20,11 @@ module Codec.CBOR.Cuddle.Comments (
   toComment,
   commentLine,
   withComment,
+
+  -- * Pretty
+  CommentRender (..),
+  prettyCommentNoBreak,
+  prettyCommentNoBreakWS,
 ) where
 
 import Data.ByteString (ByteString)
@@ -32,6 +37,7 @@ import Data.Void (Void, absurd)
 import Data.Word (Word16, Word32, Word64, Word8)
 import GHC.Generics (Generic (..), K1 (..), M1 (..), U1 (..), V1, (:*:) (..), (:+:) (..))
 import Optics.Core (Lens', lens, view, (%~), (&), (.~), (^.))
+import Prettyprinter
 
 newtype Comment = Comment [T.Text]
   deriving (Eq, Ord, Generic, Show)
@@ -194,3 +200,20 @@ instance HasComment Comment where
 
 instance IsString Comment where
   fromString = toComment . T.pack
+
+data CommentRender
+  = PreComment
+  | PostComment
+
+prettyCommentNoBreak :: Comment -> Doc ann
+prettyCommentNoBreak = align . vsep . fmap (pretty . (";" <>)) . unComment
+
+prettyCommentNoBreakWS :: Comment -> Doc ann
+prettyCommentNoBreakWS cmt
+  | cmt == mempty = mempty
+  | otherwise = space <> prettyCommentNoBreak cmt
+
+instance Pretty Comment where
+  pretty c
+    | c == mempty = mempty
+    | otherwise = prettyCommentNoBreak c <> hardline

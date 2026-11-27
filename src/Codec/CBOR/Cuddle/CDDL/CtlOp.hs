@@ -4,7 +4,9 @@
 module Codec.CBOR.Cuddle.CDDL.CtlOp where
 
 import Data.Hashable (Hashable)
+import Data.Text qualified as T
 import GHC.Generics (Generic)
+import Prettyprinter (Pretty (..))
 
 -- | A _control_ allows relating a _target_ type with a _controller_ type
 --  via a _control operator_.
@@ -34,5 +36,8 @@ data CtlOp
   | Ne
   | Default
   deriving (Eq, Generic, Show)
+
+instance Pretty CtlOp where
+  pretty = pretty . T.toLower . T.pack . show
 
 instance Hashable CtlOp

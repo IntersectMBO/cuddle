@@ -1,5 +1,6 @@
 {-# LANGUAGE CPP #-}
 {-# LANGUAGE DataKinds #-}
+{-# LANGUAGE DeriveAnyClass #-}
 {-# LANGUAGE DerivingVia #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedLabels #-}
@@ -9,6 +10,7 @@
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE UndecidableInstances #-}
 {-# LANGUAGE ViewPatterns #-}
+{-# OPTIONS_GHC -Wno-orphans #-}
 
 -- | Module containing tools for 'resolving' CDDL
 --
@@ -35,8 +37,6 @@ module Codec.CBOR.Cuddle.CDDL.Resolve (
   fullResolveCDDL,
   NameResolutionFailure (..),
   MonoReferenced,
-  MonoSimplePhase,
-  showSimple,
   XXCTree (..),
 )
 where
@@ -53,7 +53,7 @@ import Codec.CBOR.Cuddle.CDDL.CTree (
   CTree (..),
   CTreeRoot (..),
   PTerm (..),
-  XXCTree,
+  XXCTree (..),
   foldCTree,
  )
 import Codec.CBOR.Cuddle.CDDL.CTree qualified as CTree
@@ -63,14 +63,13 @@ import Control.Monad.State.Strict (StateT (..))
 import Data.Generics.Product
 import Data.Generics.Sum
 import Data.Hashable
-#if __GLASGOW_HASKELL__ < 910
+
 import Data.List (foldl')
-#endif
-import Codec.CBOR.Cuddle.CDDL.CTreePhase (CTreePhase, XRule (..))
+
 import Codec.CBOR.Cuddle.CDDL.Custom.Core (RuleTerm)
 import Codec.CBOR.Cuddle.CDDL.Custom.Generator (
-  CBORGen,
   GenPhase,
+  TermGenerator (..),
   XXCTree (..),
   withLocalGenBindings,
  )
@@ -80,7 +79,11 @@ import Codec.CBOR.Cuddle.CDDL.Custom.Validator (
   XXCTree (..),
   withLocalValidateBindings,
  )
+import Codec.CBOR.Cuddle.CDDL.Phase (CTreePhase, HuddleStage, MonoReferenced, MonoSimplePhase)
+import Codec.CBOR.Cuddle.Huddle (XRule (..), XXType2 (..))
 import Codec.CBOR.Cuddle.IndexMappable (IndexMappable (..))
+import Codec.CBOR.Cuddle.Parser (ParserStage)
+import Data.Default.Class (Default)
 import Data.List.NonEmpty qualified as NE
 import Data.Map.Strict qualified as Map
 import Data.Text qualified as T
@@ -101,13 +104,31 @@ instance Hashable a => Hashable (ProvidedParameters a)
 -- 1. Rule extensions
 --------------------------------------------------------------------------------
 
+data instance XTerm CTreePhase = CTreeXTerm
+  deriving (Generic, Show, Eq, Ord)
+  deriving anyclass (Hashable, Default)
+
+data instance XXTopLevel CTreePhase
+  deriving (Generic, Show, Eq, Ord)
+
+data instance XCddl CTreePhase = CTreeXCddl
+  deriving (Generic, Show, Eq, Ord)
+
+data instance XRule CTreePhase
+  = CTreeXRule (TermGenerator RuleTerm -> TermGenerator RuleTerm) (TermValidator -> TermValidator)
+  deriving (Generic)
+
+data instance XXType2 CTreePhase
+  deriving (Generic, Show, Eq, Ord)
+  deriving anyclass (Hashable)
+
 newtype PartialCTreeRoot i = PartialCTreeRoot (Map.Map Name (ProvidedParameters (CTree i)))
   deriving (Generic)
 
 data CDDLMapEntry = CDDLMapEntry
   { cmeProvidedParameters :: ProvidedParameters (TypeOrGroup CTreePhase)
-  , cmeCustomGenerator :: Maybe (CBORGen RuleTerm)
-  , cmeCustomValidator :: Maybe TermValidator
+  , cmeCustomGenerator :: TermGenerator RuleTerm -> TermGenerator RuleTerm
+  , cmeCustomValidator :: TermValidator -> TermValidator
   }
   deriving (Generic)
 
@@ -157,7 +178,7 @@ asMap cddl = foldl' go Map.empty rules
       (TOGType _, _) -> error "Attempting to extend a type with a group"
       (TOGGroup _, _) -> error "Attempting to extend a group with a type"
     extend tog gps Nothing =
-      Just $ CDDLMapEntry (toParametrised tog gps) Nothing Nothing
+      Just $ CDDLMapEntry (toParametrised tog gps) id id
 
 --------------------------------------------------------------------------------
 -- 2. Conversion to CTree
@@ -168,8 +189,8 @@ type data OrReferenced
 data instance XXCTree OrReferenced
   = -- | Reference to another node with possible generic arguments supplied
     OrRef Name [CTree OrReferenced]
-  | OGenerator (CBORGen RuleTerm) (CTree OrReferenced)
-  | OValidator TermValidator (CTree OrReferenced)
+  | OGenerator (TermGenerator RuleTerm -> TermGenerator RuleTerm) (CTree OrReferenced)
+  | OValidator (TermValidator -> TermValidator) (CTree OrReferenced)
 
 type data OrReferencedSimple
 
@@ -213,12 +234,8 @@ buildRefCTree rules = PartialCTreeRoot $ toCTreeRule <$> rules
     toCTreeRule CDDLMapEntry {..} =
       applyValidator . applyGenerator . toCTreeTOG <$> cmeProvidedParameters
       where
-        applyGenerator = case cmeCustomGenerator of
-          Just g -> CTreeE . OGenerator g
-          Nothing -> id
-        applyValidator = case cmeCustomValidator of
-          Just v -> CTreeE . OValidator v
-          Nothing -> id
+        applyGenerator = CTreeE . OGenerator cmeCustomGenerator
+        applyValidator = CTreeE . OValidator cmeCustomValidator
 
     toCTreeTOG :: TypeOrGroup CTreePhase -> CTree OrReferenced
     toCTreeTOG (TOGType t0) = toCTreeT0 t0
@@ -416,13 +433,14 @@ instance Pretty (XXCTree i) => Pretty (DistRef i) where
 
 data instance XXCTree DistReferenced
   = DRef (DistRef DistReferenced)
-  | DGenerator (CBORGen RuleTerm) (CTree DistReferenced)
-  | DValidator TermValidator (CTree DistReferenced)
+  | DGenerator (TermGenerator RuleTerm -> TermGenerator RuleTerm) (CTree DistReferenced)
+  | DValidator (TermValidator -> TermValidator) (CTree DistReferenced)
 
 type data DistReferencedNoGen
 
 newtype instance XXCTree DistReferencedNoGen = DHRef (DistRef DistReferencedNoGen)
-  deriving (Eq, Hashable, Show)
+  deriving (Generic, Eq, Show)
+  deriving anyclass (Hashable)
   deriving newtype (Pretty)
 
 resolveRef ::
@@ -468,68 +486,15 @@ buildResolvedCTree (PartialCTreeRoot ct) = PartialCTreeRoot <$> traverse go ct
 -- 4. Monomorphisation
 --------------------------------------------------------------------------------
 
-type data MonoReferenced
-
 data instance XXCTree MonoReferenced
   = MRuleRef Name
-  | MGenerator (CBORGen RuleTerm) (CTree MonoReferenced)
-  | MValidator TermValidator (CTree MonoReferenced)
+  | MGenerator (TermGenerator RuleTerm -> TermGenerator RuleTerm) (CTree MonoReferenced)
+  | MValidator (TermValidator -> TermValidator) (CTree MonoReferenced)
 
 type MonoEnv = BindingEnv DistReferenced MonoReferenced
 
 -- | We introduce additional bindings in the state
 type MonoState = Map.Map Name (CTree MonoReferenced)
-
--- | A simplified phase reachable from any of the function-bearing post-mono
--- phases ('MonoReferenced', 'GenPhase', 'ValidatorPhase'). It strips the
--- generator/validator extensions so the tree can be `Show`n, `Eq`-compared,
--- and pretty-printed for debug output.
-type data MonoSimplePhase
-
-newtype instance XXCTree MonoSimplePhase = MSimpleRef Name
-  deriving (Generic, Show, Eq)
-
-instance Pretty (XXCTree MonoSimplePhase) where
-  pretty (MSimpleRef n) = pretty n
-
-instance IndexMappable CTree MonoReferenced MonoSimplePhase where
-  mapIndex = foldCTree mapExt mapIndex
-    where
-      mapExt (MRuleRef n) = CTreeE $ MSimpleRef n
-      mapExt (MGenerator _ x) = mapIndex x
-      mapExt (MValidator _ x) = mapIndex x
-
-instance IndexMappable CTreeRoot MonoReferenced MonoSimplePhase where
-  mapIndex (CTreeRoot m) = CTreeRoot $ mapIndex <$> m
-
-instance IndexMappable CTree GenPhase MonoSimplePhase where
-  mapIndex = foldCTree mapExt mapIndex
-    where
-      mapExt (GenRef n) = CTreeE $ MSimpleRef n
-      mapExt (GenGenerator _ x) = mapIndex x
-      mapExt (GenValidator _ x) = mapIndex x
-
-instance IndexMappable CTreeRoot GenPhase MonoSimplePhase where
-  mapIndex (CTreeRoot m) = CTreeRoot $ mapIndex <$> m
-
-instance IndexMappable CTree ValidatorPhase MonoSimplePhase where
-  mapIndex = foldCTree mapExt mapIndex
-    where
-      mapExt (VRuleRef n) = CTreeE $ MSimpleRef n
-      mapExt (VValidator _ x) = mapIndex x
-
-instance IndexMappable CTreeRoot ValidatorPhase MonoSimplePhase where
-  mapIndex (CTreeRoot m) = CTreeRoot $ mapIndex <$> m
-
--- | Project any phase that maps to 'MonoSimplePhase' down to a `Show`able
--- representation. Used for debug output by `Gen`, `Validator`, etc.
-showSimple ::
-  forall a phase.
-  ( IndexMappable a phase MonoSimplePhase
-  , Show (a MonoSimplePhase)
-  ) =>
-  a phase -> String
-showSimple = show . mapIndex @_ @_ @MonoSimplePhase
 
 -- | Monad to run the monomorphisation process. We need some additional
 -- capabilities for this, so 'Either' doesn't fully cut it anymore.
@@ -540,7 +505,7 @@ newtype MonoM a = MonoM
         (StateT MonoState (Reader MonoEnv))
         a
   }
-  deriving (Functor, Applicative, Monad)
+  deriving newtype (Functor, Applicative, Monad)
   deriving
     (HasThrow "nameResolution" NameResolutionFailure)
     via MonadError
@@ -633,18 +598,20 @@ resolveGenericRef (DRef (GenericRef n)) = do
   case Map.lookup n localBinds of
     Just node -> pure node
     Nothing -> throwNR $ UnboundReference n
-resolveGenericRef (DGenerator g x) = do
+resolveGenericRef (DGenerator fGen x) = do
   binds <- ask @"local"
   body <- resolveGenericCTree x
   let bindsGen = mapIndex @CTree @MonoReferenced @GenPhase <$> binds
-      g' = withLocalGenBindings bindsGen g
+      g' tg =
+        let TermGenerator newGen m = fGen tg
+         in TermGenerator (withLocalGenBindings bindsGen newGen) m
   pure . CTreeE $ MGenerator g' body
-resolveGenericRef (DValidator v x) = do
+resolveGenericRef (DValidator fVal x) = do
   binds <- ask @"local"
   body <- resolveGenericCTree x
   let bindsVal = mapIndex @CTree @MonoReferenced @ValidatorPhase <$> binds
-      v' = withLocalValidateBindings bindsVal . v
-  pure . CTreeE $ MValidator v' body
+      g' tv = withLocalValidateBindings bindsVal . fVal tv
+  pure . CTreeE $ MValidator g' body
 
 resolveGenericCTree ::
   CTree DistReferenced ->
@@ -684,6 +651,10 @@ fullResolveCDDL cddl = do
   rCTree <- buildResolvedCTree refCTree
   buildMonoCTree rCTree
 
+-- * IndexMappable
+
+-- DistReferenced -> DistReferencedNoGen
+
 instance IndexMappable CTree DistReferenced DistReferencedNoGen where
   mapIndex = foldCTree mapExt mapIndex
     where
@@ -694,3 +665,55 @@ instance IndexMappable CTree DistReferenced DistReferencedNoGen where
 instance IndexMappable DistRef DistReferenced DistReferencedNoGen where
   mapIndex (GenericRef n) = GenericRef n
   mapIndex (RuleRef n args) = RuleRef n $ mapIndex <$> args
+
+-- MonoReferenced -> MonoSimplePhase
+
+instance IndexMappable CTree MonoReferenced MonoSimplePhase where
+  mapIndex = foldCTree mapExt mapIndex
+    where
+      mapExt (MRuleRef n) = CTreeE $ MSimpleRef n
+      mapExt (MGenerator _ x) = mapIndex x
+      mapExt (MValidator _ x) = mapIndex x
+
+instance IndexMappable CTreeRoot MonoReferenced MonoSimplePhase where
+  mapIndex (CTreeRoot m) = CTreeRoot $ mapIndex <$> m
+
+-- ParserStage -> CTreePhase
+
+instance IndexMappable XCddl ParserStage CTreePhase where
+  mapIndex _ = CTreeXCddl
+
+instance IndexMappable XXType2 ParserStage CTreePhase where
+  mapIndex (ParserXXType2 c) = case c of {}
+
+instance IndexMappable XTerm ParserStage CTreePhase where
+  mapIndex _ = CTreeXTerm
+
+instance IndexMappable XRule ParserStage CTreePhase where
+  mapIndex _ = CTreeXRule id id
+
+-- GenPhase -> MonoSimplePhase
+
+instance IndexMappable CTree GenPhase MonoSimplePhase where
+  mapIndex = foldCTree mapExt mapIndex
+    where
+      mapExt (GenRef n) = CTreeE $ MSimpleRef n
+      mapExt (GenGenerator _ x) = mapIndex x
+      mapExt (GenValidator _ x) = mapIndex x
+
+instance IndexMappable CTreeRoot GenPhase MonoSimplePhase where
+  mapIndex (CTreeRoot m) = CTreeRoot $ mapIndex <$> m
+
+-- HuddleStage -> CTreePhase
+
+instance IndexMappable XCddl HuddleStage CTreePhase where
+  mapIndex _ = CTreeXCddl
+
+instance IndexMappable XXType2 HuddleStage CTreePhase where
+  mapIndex (HuddleXXType2 c) = case c of {}
+
+instance IndexMappable XTerm HuddleStage CTreePhase where
+  mapIndex _ = CTreeXTerm
+
+instance IndexMappable XRule HuddleStage CTreePhase where
+  mapIndex (HuddleXRule _ g v) = CTreeXRule g v

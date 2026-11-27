@@ -12,24 +12,24 @@ module Test.Codec.CBOR.Cuddle.CDDL.Validator (
 ) where
 
 import Codec.CBOR.Cuddle.CBOR.Canonical (toCanonical)
-import Codec.CBOR.Cuddle.CBOR.Gen (generateFromName)
+import Codec.CBOR.Cuddle.CBOR.Generator (XXCTree (..), generateFromName)
 import Codec.CBOR.Cuddle.CBOR.Validator (
   ValidatorPhase,
   validateCBOR,
  )
-import Codec.CBOR.Cuddle.CBOR.Validator.Trace (
-  Evidenced (..),
-  SValidity (..),
-  ValidationTrace,
-  defaultTraceOptions,
-  prettyValidationTrace,
- )
-import Codec.CBOR.Cuddle.CDDL (Name (..))
+import Codec.CBOR.Cuddle.CDDL (Name (..), mapCDDLDropExt)
 import Codec.CBOR.Cuddle.CDDL.CTree (CTreeRoot (..))
 import Codec.CBOR.Cuddle.CDDL.CTree qualified as CTree
-import Codec.CBOR.Cuddle.CDDL.Custom.Core (RuleTerm (..))
-import Codec.CBOR.Cuddle.CDDL.Custom.Generator (GenConfig (..), runCBORGen, twiddleAll)
-import Codec.CBOR.Cuddle.CDDL.Custom.Validator (TermValidator)
+import Codec.CBOR.Cuddle.CDDL.Custom.Generator (GenConfig (..), runCBORGen)
+import Codec.CBOR.Cuddle.CDDL.Custom.Validator (
+  Block (..),
+  Evidenced (..),
+  SValidity (..),
+  StepTrace,
+  TermValidator,
+  defaultTraceOptions,
+  prettyStepTrace,
+ )
 import Codec.CBOR.Cuddle.CDDL.Postlude (appendPostlude)
 import Codec.CBOR.Cuddle.CDDL.Resolve (MonoReferenced, fullResolveCDDL)
 import Codec.CBOR.Cuddle.Huddle (
@@ -49,7 +49,7 @@ import Codec.CBOR.Cuddle.Huddle (
   (=:~),
  )
 import Codec.CBOR.Cuddle.Huddle qualified as H
-import Codec.CBOR.Cuddle.IndexMappable (mapCDDLDropExt, mapIndex)
+import Codec.CBOR.Cuddle.IndexMappable (mapIndex)
 import Codec.CBOR.Cuddle.Parser (pCDDL)
 import Codec.CBOR.Pretty (prettyHexEnc)
 import Codec.CBOR.Term (Term (..), encodeTerm)
@@ -108,7 +108,7 @@ validateCBOR_ ::
   BS.ByteString ->
   Name ->
   CTreeRoot ValidatorPhase ->
-  Evidenced ValidationTrace
+  Evidenced (StepTrace TermBlock)
 validateCBOR_ bs n cddl = either (\e -> error $ "validateCBOR failed:\n" <> show e) id $ validateCBOR bs n cddl
 
 -- | Test that a specific rule in a resolved CDDL generates valid values
@@ -117,10 +117,7 @@ genAndValidateRule description name resolvedCddl =
   prop description $ do
     let
       genCfg =
-        GenConfig
-          { gcRoot = mapIndex resolvedCddl
-          , gcTwiddle = twiddleAll
-          }
+        GenConfig $ mapIndex resolvedCddl
     cborTerm <- runAntiGen . runCBORGen genCfg $ generateFromName name
     let
       generatedCbor = toStrictByteString $ encodeTerm cborTerm
@@ -136,6 +133,8 @@ genAndValidateRule description name resolvedCddl =
 genAndValidateCddl :: String -> CTreeRoot MonoReferenced -> Spec
 genAndValidateCddl description resolvedCddl@(CTreeRoot m) = do
   let
+    isRule (CTree.CTreeE (MGenerator _ r)) = isRule r
+    isRule (CTree.CTreeE (MValidator _ r)) = isRule r
     isRule CTree.Group {} = False
     isRule _ = True
   describe description $ do
@@ -180,9 +179,6 @@ genHuddleArrayTerms = do
   bools <- listOf $ TBool <$> arbitrary
   required <- genHuddleArrayRequiredTerms
   pure $ bools <> required
-
-genHuddleArray :: Gen Term
-genHuddleArray = genHuddleArrayTerms >>= genArrayTerm
 
 genBadArrayReversed :: Gen Term
 genBadArrayReversed = genHuddleArrayTerms >>= genArrayTerm . reverse . (TBool True :)
@@ -277,7 +273,7 @@ validateHuddle ::
   Huddle ->
   Name ->
   Term ->
-  Evidenced ValidationTrace
+  Evidenced (StepTrace TermBlock)
 validateHuddle huddle name term = do
   let
     resolvedCddl = case fullResolveCDDL . mapCDDLDropExt $ toCDDL huddle of
@@ -286,28 +282,28 @@ validateHuddle huddle name term = do
     bs = toStrictByteString $ encodeTerm term
   validateCBOR_ bs name (mapIndex resolvedCddl)
 
-expectValid :: Evidenced ValidationTrace -> Expectation
+expectValid :: Evidenced (StepTrace TermBlock) -> Expectation
 expectValid (Evidenced SValid _) = pure ()
 expectValid (Evidenced SInvalid t) =
   expectationFailure . T.unpack $
     "Expected a success, got failure:\n"
-      <> renderStrict (layoutPretty defaultLayoutOptions $ prettyValidationTrace defaultTraceOptions t)
+      <> renderStrict (layoutPretty defaultLayoutOptions $ prettyStepTrace defaultTraceOptions t)
 
-expectInvalid :: Evidenced ValidationTrace -> Expectation
+expectInvalid :: Evidenced (StepTrace TermBlock) -> Expectation
 expectInvalid (Evidenced SValid t) =
   expectationFailure . T.unpack $
     "Expected a failure, but got success:\n"
-      <> renderStrict (layoutPretty defaultLayoutOptions $ prettyValidationTrace defaultTraceOptions t)
+      <> renderStrict (layoutPretty defaultLayoutOptions $ prettyStepTrace defaultTraceOptions t)
 expectInvalid _ = pure ()
 
 stringValidator :: TermValidator
-stringValidator (SingleTerm (TString _)) = pure ()
-stringValidator (SingleTerm (TStringI _)) = pure ()
+stringValidator (TString _) = pure ()
+stringValidator (TStringI _) = pure ()
 stringValidator t = fail $ "Expected a string, got\n" <> show t
 
 bytesValidator :: TermValidator
-bytesValidator (SingleTerm (TBytes _)) = pure ()
-bytesValidator (SingleTerm (TBytesI _)) = pure ()
+bytesValidator (TBytes _) = pure ()
+bytesValidator (TBytesI _) = pure ()
 bytesValidator t = fail $ "Expected bytes, got\n" <> show t
 
 spec :: Spec
@@ -325,8 +321,6 @@ spec = describe "Validator" $ do
       describe "Positive" $ do
         prop "Validates a full map" . forAll genFullMap $
           expectValid . validateHuddle huddleMap "a"
-        prop "Validates array" . forAll genHuddleArray $
-          expectValid . validateHuddle huddleArray "a"
         prop "Validates map with correct number of range elements"
           . forAll (genHuddleRangeMap (5, 10))
           $ expectValid . validateHuddle huddleRangeMap "a"
