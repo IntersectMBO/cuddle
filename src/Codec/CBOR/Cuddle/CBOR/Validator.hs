@@ -40,6 +40,7 @@ import Data.ByteString qualified as BS
 import Data.ByteString.Lazy qualified as BSL
 import Data.Foldable (Foldable (..), asum)
 import Data.Function (on)
+import Data.Functor (($>))
 import Data.IntSet qualified as IS
 import Data.List (maximumBy)
 import Data.List.NonEmpty qualified as NE
@@ -218,13 +219,15 @@ validateInteger i rule =
     _ -> reject rule
   where
     validateBigInt x = case x of
+      CTreeE (VValidator _ r) ->
+        -- TODO fix this once we have replaced Term
+        validateBigInt r
       CTreeE (VRuleRef n) -> dereference n validateBigInt
       Postlude PTBytes -> accept rule
       Control op tgt@(Postlude PTBytes) ctrl ->
         validateBytes bs tgt >> controlBytes bs op ctrl
         where
-          -- TODO figure out a way to turn Integer into bytes or figure out why
-          -- tagged bigints are decoded as integers in the first place
+          -- TODO fix this once we have replaced Term
           bs = mempty
       _ -> reject rule
 
@@ -670,7 +673,9 @@ validateListBlock terms rules = do
     matchSingle :: CTree ValidatorPhase -> [Term] -> ValidatorT ListBlock [Term]
     matchSingle r [] = failWith $ ArrayLeftoverRule $ mapIndex r
     matchSingle r (t : ts) = case r of
-      CTreeE (VRuleRef n) -> dereference n $ \ref -> matchSingle ref (t : ts)
+      CTreeE (VRuleRef n) -> dereferenceNoTrace n $ \case
+        CTreeE (VValidator _ g@Group {}) -> withRef n $ matchSingle g (t : ts)
+        _ -> element (validateTerm t r) $> ts
       CTreeE (VValidator v x) -> do
         element $ applyCustomValidator v x t
         pure ts
