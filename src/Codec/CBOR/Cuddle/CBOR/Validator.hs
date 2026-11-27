@@ -18,6 +18,7 @@ import Codec.CBOR.Cuddle.CDDL hiding (CDDL, Group, Rule)
 import Codec.CBOR.Cuddle.CDDL.CTree
 import Codec.CBOR.Cuddle.CDDL.CtlOp
 import Codec.CBOR.Cuddle.CDDL.Custom.Core (
+  LengthEncoding (..),
   MonadCddl (..),
   evalBool,
   evalBytes,
@@ -38,6 +39,7 @@ import Control.Monad (filterM, void)
 import Data.Bits hiding (And)
 import Data.ByteString qualified as BS
 import Data.ByteString.Lazy qualified as BSL
+import Data.ByteString.Lazy qualified as LBS
 import Data.Foldable (Foldable (..), asum)
 import Data.Function (on)
 import Data.Functor (($>))
@@ -49,6 +51,7 @@ import Data.Maybe
 import Data.Set qualified as Set
 import Data.Text qualified as T
 import Data.Text.Foreign (lengthWord8)
+import Data.Text.Lazy qualified as LT
 import Data.Text.Lazy qualified as TL
 import Data.Word
 import GHC.Float
@@ -122,14 +125,14 @@ validateTerm term rule
       case term of
         TInt i -> validateInteger (fromIntegral i) rule
         TInteger i -> validateInteger i rule
-        TBytes b -> validateBytes b rule
-        TBytesI b -> validateBytes (BSL.toStrict b) rule
-        TString s -> validateText s rule
-        TStringI s -> validateText (TL.toStrict s) rule
-        TList ts -> validateList ts rule
-        TListI ts -> validateList ts rule
-        TMap ts -> validateMap ts rule
-        TMapI ts -> validateMap ts rule
+        TBytes b -> validateBytes DefiniteLength b rule
+        TBytesI b -> validateBytes IndefiniteLength (BSL.toStrict b) rule
+        TString s -> validateText DefiniteLength s rule
+        TStringI s -> validateText IndefiniteLength (TL.toStrict s) rule
+        TList ts -> validateList DefiniteLength ts rule
+        TListI ts -> validateList IndefiniteLength ts rule
+        TMap ts -> validateMap DefiniteLength ts rule
+        TMapI ts -> validateMap IndefiniteLength ts rule
         TTagged w t -> validateTagged w t rule
         TBool b -> validateBool b rule
         TNull -> validateNull rule
@@ -225,7 +228,7 @@ validateInteger i rule =
       CTreeE (VRuleRef n) -> dereference n validateBigInt
       Postlude PTBytes -> accept rule
       Control op tgt@(Postlude PTBytes) ctrl ->
-        validateBytes bs tgt >> controlBytes bs op ctrl
+        validateBytes DefiniteLength bs tgt >> controlBytes bs op ctrl
         where
           -- TODO fix this once we have replaced Term
           bs = mempty
@@ -509,12 +512,15 @@ validateNull rule =
 -- | Validating a byte sequence
 validateBytes ::
   HasCallStack =>
+  LengthEncoding ->
   BS.ByteString ->
   CTree ValidatorPhase ->
   Validator ()
-validateBytes bs (CTreeE (VRuleRef n)) = dereference n $ validateBytes bs
-validateBytes bs (CTreeE (VValidator v x)) = applyCustomValidator v x $ TBytes bs
-validateBytes bs rule =
+validateBytes le bs (CTreeE (VRuleRef n)) = dereference n $ validateBytes le bs
+validateBytes le bs (CTreeE (VValidator v x)) = applyCustomValidator v x $ case le of
+  DefiniteLength -> TBytes bs
+  IndefiniteLength -> TBytesI $ LBS.fromStrict bs
+validateBytes le bs rule =
   case rule of
     -- a = any
     Postlude PTAny -> accept rule
@@ -525,9 +531,9 @@ validateBytes bs rule =
       x <- evalBytes rule
       ruleVerdict rule $ x == Just bs
     -- a = foo .ctrl bar
-    Control op tgt ctrl -> validateBytes bs tgt >> controlBytes bs op ctrl
+    Control op tgt ctrl -> validateBytes le bs tgt >> controlBytes bs op ctrl
     -- a = foo / bar
-    Choice opts -> validateChoice (validateBytes bs) opts
+    Choice opts -> validateChoice (validateBytes le bs) opts
     _ -> reject rule
 
 -- | Controls for byte strings
@@ -577,12 +583,15 @@ controlBytes bs op ctrl = case op of
 -- | Validating text strings
 validateText ::
   HasCallStack =>
+  LengthEncoding ->
   T.Text ->
   CTree ValidatorPhase ->
   Validator ()
-validateText txt (CTreeE (VRuleRef n)) = dereference n $ validateText txt
-validateText txt (CTreeE (VValidator v x)) = applyCustomValidator v x $ TString txt
-validateText txt rule =
+validateText le txt (CTreeE (VRuleRef n)) = dereference n $ validateText le txt
+validateText le txt (CTreeE (VValidator v x)) = applyCustomValidator v x $ case le of
+  DefiniteLength -> TString txt
+  IndefiniteLength -> TStringI $ LT.fromStrict txt
+validateText le txt rule =
   case rule of
     -- a = any
     Postlude PTAny -> accept rule
@@ -593,9 +602,9 @@ validateText txt rule =
       x <- evalText rule
       ruleVerdict rule $ x == Just txt
     -- a = foo .ctrl bar
-    Control op tgt ctrl -> validateText txt tgt >> controlText txt op ctrl
+    Control op tgt ctrl -> validateText le txt tgt >> controlText txt op ctrl
     -- a = foo / bar
-    Choice opts -> validateChoice (validateText txt) opts
+    Choice opts -> validateChoice (validateText le txt) opts
     _ -> reject rule
 
 -- | Controls for text strings
@@ -720,16 +729,19 @@ validateListBlock terms rules = do
         matchSeq rs remainingTerms
 
 validateList ::
+  LengthEncoding ->
   [Term] ->
   CTree ValidatorPhase ->
   Validator ()
-validateList terms (CTreeE (VRuleRef n)) = dereference n $ validateList terms
-validateList terms (CTreeE (VValidator v x)) = applyCustomValidator v x $ TList terms
-validateList terms rule =
+validateList le terms (CTreeE (VRuleRef n)) = dereference n $ validateList le terms
+validateList le terms (CTreeE (VValidator v x)) = applyCustomValidator v x $ case le of
+  DefiniteLength -> TList terms
+  IndefiniteLength -> TListI terms
+validateList le terms rule =
   case rule of
     Postlude PTAny -> accept rule
     Array rules -> withArray $ validateListBlock terms rules
-    Choice opts -> validateChoice (validateList terms) opts
+    Choice opts -> validateChoice (validateList le terms) opts
     _ -> reject rule
 
 --------------------------------------------------------------------------------
@@ -814,16 +826,19 @@ validateMapBlock terms rules = do
 
 validateMap ::
   HasCallStack =>
+  LengthEncoding ->
   [(Term, Term)] ->
   CTree ValidatorPhase ->
   Validator ()
-validateMap terms (CTreeE (VRuleRef n)) = dereference n $ validateMap terms
-validateMap terms (CTreeE (VValidator v x)) = applyCustomValidator v x $ TMap terms
-validateMap terms rule =
+validateMap le terms (CTreeE (VRuleRef n)) = dereference n $ validateMap le terms
+validateMap le terms (CTreeE (VValidator v x)) = applyCustomValidator v x $ case le of
+  DefiniteLength -> TMap terms
+  IndefiniteLength -> TMapI terms
+validateMap le terms rule =
   case rule of
     Postlude PTAny -> accept rule
     Map rules -> withMap $ validateMapBlock terms rules
-    Choice opts -> validateChoice (validateMap terms) opts
+    Choice opts -> validateChoice (validateMap le terms) opts
     _ -> reject rule
 
 --------------------------------------------------------------------------------

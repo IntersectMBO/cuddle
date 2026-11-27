@@ -4,6 +4,7 @@
 module Codec.CBOR.Cuddle.CDDL.Custom.Core (
   MonadCddl (..),
   RuleTerm (..),
+  LengthEncoding (..),
   evalBool,
   evalInteger,
   evalDouble,
@@ -41,6 +42,10 @@ data RuleTerm
   | PairTerm Term Term
   | GroupTerm [RuleTerm]
   deriving (Eq, Ord, Show)
+
+data LengthEncoding
+  = DefiniteLength
+  | IndefiniteLength
 
 evalExt ::
   MonadCddl m =>
