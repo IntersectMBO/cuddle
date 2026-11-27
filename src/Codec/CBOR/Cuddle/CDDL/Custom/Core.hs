@@ -4,10 +4,13 @@
 module Codec.CBOR.Cuddle.CDDL.Custom.Core (
   MonadCddl (..),
   RuleTerm (..),
+  evalBool,
   evalInteger,
   evalDouble,
   evalArray,
   evalInterval,
+  evalBytes,
+  evalText,
 ) where
 
 import Codec.CBOR.Cuddle.CDDL (GRef, Name, RangeBound (..), Value (..), ValueVariant (..))
@@ -15,7 +18,9 @@ import Codec.CBOR.Cuddle.CDDL.CTree (CTree (..), XXCTree)
 import Codec.CBOR.Cuddle.Interval (Interval (..), IntervalBound (..))
 import Codec.CBOR.Cuddle.Interval qualified as Interval
 import Codec.CBOR.Term (Term)
+import Data.ByteString (ByteString)
 import Data.Kind (Type)
+import Data.Text (Text)
 import GHC.Float (float2Double)
 
 class Monad m => MonadCddl m where
@@ -48,6 +53,12 @@ evalExt ext f = do
     Just x -> f x
     Nothing -> pure Nothing
 
+evalBool :: MonadCddl m => CTree (Phase m) -> m (Maybe Bool)
+evalBool = \case
+  Literal (Value (VBool b) _) -> pure $ Just b
+  CTreeE ext -> evalExt ext evalBool
+  _ -> pure Nothing
+
 evalDouble :: MonadCddl m => CTree (Phase m) -> m (Maybe Double)
 evalDouble = \case
   Literal (Value var _)
@@ -74,7 +85,25 @@ evalArray ::
 evalArray f = \case
   Array es -> sequence <$> traverse f es
   CTreeE ext -> evalExt ext $ evalArray f
-  _ -> error "Expected array"
+  _ -> pure Nothing
+
+evalBytes ::
+  MonadCddl m =>
+  CTree (Phase m) ->
+  m (Maybe ByteString)
+evalBytes = \case
+  Literal (Value (VBytes bs) _) -> pure $ Just bs
+  CTreeE ext -> evalExt ext evalBytes
+  _ -> pure Nothing
+
+evalText ::
+  MonadCddl m =>
+  CTree (Phase m) ->
+  m (Maybe Text)
+evalText = \case
+  Literal (Value (VText t) _) -> pure $ Just t
+  CTreeE ext -> evalExt ext evalText
+  _ -> pure Nothing
 
 evalInterval ::
   MonadCddl m =>

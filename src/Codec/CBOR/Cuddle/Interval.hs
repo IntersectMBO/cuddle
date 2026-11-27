@@ -48,8 +48,12 @@ lessThan x = Interval Unbounded (OpenBound x)
 (...) :: a -> a -> Interval a
 lo ... hi = Interval (ClosedBound lo) (OpenBound hi)
 
+infix 5 ...
+
 (..=) :: a -> a -> Interval a
 lo ..= hi = Interval (ClosedBound lo) (ClosedBound hi)
+
+infix 5 ..=
 
 -- | This function checks whether the interval contains any elements. It does
 -- not take the bounds of the type into account, it only checks whether the

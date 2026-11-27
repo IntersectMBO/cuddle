@@ -17,10 +17,20 @@ import Codec.CBOR.Cuddle.CBOR.Canonical (toCanonical)
 import Codec.CBOR.Cuddle.CDDL hiding (CDDL, Group, Rule)
 import Codec.CBOR.Cuddle.CDDL.CTree
 import Codec.CBOR.Cuddle.CDDL.CtlOp
-import Codec.CBOR.Cuddle.CDDL.Custom.Core (MonadCddl (..))
+import Codec.CBOR.Cuddle.CDDL.Custom.Core (
+  MonadCddl (..),
+  evalBool,
+  evalBytes,
+  evalDouble,
+  evalInteger,
+  evalInterval,
+  evalText,
+ )
 import Codec.CBOR.Cuddle.CDDL.Custom.Validator
 import Codec.CBOR.Cuddle.CDDL.Phase (MonoSimplePhase, showSimple)
 import Codec.CBOR.Cuddle.IndexMappable (IndexMappable (..))
+import Codec.CBOR.Cuddle.Interval ((...))
+import Codec.CBOR.Cuddle.Interval qualified as Interval
 import Codec.CBOR.Read
 import Codec.CBOR.Term
 import Control.Applicative (Alternative (..), optional)
@@ -37,7 +47,7 @@ import Data.Map.Strict qualified as Map
 import Data.Maybe
 import Data.Set qualified as Set
 import Data.Text qualified as T
-import Data.Text.Encoding (encodeUtf8)
+import Data.Text.Foreign (lengthWord8)
 import Data.Text.Lazy qualified as TL
 import Data.Word
 import GHC.Float
@@ -127,6 +137,16 @@ validateTerm term rule
         TFloat h -> validateFloat h rule
         TDouble d -> validateDouble d rule
 
+validateRange ::
+  (HasCallStack, Ord a) =>
+  a ->
+  CTree ValidatorPhase ->
+  (CTree ValidatorPhase -> Validator (Maybe a)) ->
+  Validator ()
+validateRange v rule evalElem = do
+  interval <- expectWellFormed <$> evalInterval evalElem rule
+  ruleVerdict rule $ Interval.contains interval v
+
 --------------------------------------------------------------------------------
 -- Ints and integers
 
@@ -174,45 +194,15 @@ validateInteger i rule =
     Postlude PTNInt
       | i >= nintMin && i <= -1 -> accept rule
     -- a = x
-    Literal (Value (VUInt i') _) | i == fromIntegral i' -> accept rule
-    -- a = -x
-    Literal (Value (VNInt i') _) | -i == fromIntegral i' -> accept rule
-    -- a = <big number>
-    Literal (Value (VBignum i') _) | i == i' -> accept rule
+    Literal _ -> do
+      x <- evalInteger rule
+      ruleVerdict rule $ x == Just i
     -- a = foo .ctrl bar
     Control op tgt ctrl -> validateInteger i tgt >> controlInteger i op ctrl
     -- a = foo / bar
     Choice opts -> validateChoice (validateInteger i) opts
     -- a = x..y
-    Range low high bound ->
-      case (low, high) of
-        (Literal (Value (VUInt (fromIntegral -> n)) _), Literal (Value (VUInt (fromIntegral -> m)) _))
-          | n <= i && range bound i m -> accept rule
-          | otherwise -> reject rule
-        (Literal (Value (VNInt (fromIntegral -> n)) _), Literal (Value (VUInt (fromIntegral -> m)) _))
-          | -n <= i && range bound i m -> accept rule
-          | otherwise -> reject rule
-        (Literal (Value (VNInt (fromIntegral -> n)) _), Literal (Value (VNInt (fromIntegral -> m)) _))
-          | -n <= i && range bound i (-m) -> accept rule
-          | otherwise -> reject rule
-        (Literal (Value VUInt {} _), Literal (Value VNInt {} _)) -> error "range types mismatch"
-        (Literal (Value (VBignum n) _), Literal (Value (VUInt (fromIntegral -> m)) _))
-          | n <= i && range bound i m -> accept rule
-          | otherwise -> reject rule
-        (Literal (Value (VBignum n) _), Literal (Value (VNInt (fromIntegral -> m)) _))
-          | n <= i && range bound i (-m) -> accept rule
-          | otherwise -> reject rule
-        (Literal (Value (VUInt (fromIntegral -> n)) _), Literal (Value (VBignum m) _))
-          | n <= i && range bound i m -> accept rule
-          | otherwise -> reject rule
-        (Literal (Value (VNInt (fromIntegral -> n)) _), Literal (Value (VBignum m) _))
-          | (-n) <= i && range bound i m -> accept rule
-          | otherwise -> reject rule
-        (CTreeE (VRuleRef n), _) ->
-          dereferenceNoTrace n $ \lo -> validateInteger i (Range lo high bound)
-        (_, CTreeE (VRuleRef n)) -> do
-          dereferenceNoTrace n $ \hi -> validateInteger i (Range low hi bound)
-        (lo, hi) -> error $ "Unable to validate range: (" <> showSimple lo <> ", " <> showSimple hi <> ")"
+    Range {} -> validateRange i rule evalInteger
     -- a = &(x, y, z)
     Enum g ->
       case g of
@@ -247,9 +237,9 @@ controlInteger ::
   Validator ()
 controlInteger i op (CTreeE (VRuleRef n)) = dereferenceNoTrace n $ controlInteger i op
 controlInteger i op ctrl = case op of
-  Size -> case ctrl of
-    Literal (Value (VUInt sz) _) -> verdict $ 0 <= i && i < 256 ^ sz
-    _ -> verdict False
+  Size -> do
+    sz <- expectWellFormed <$> evalInteger ctrl
+    verdict $ Interval.contains (0 ... 256 ^ sz) i
   Bits -> do
     indices <- case ctrl of
       Literal (Value (VUInt i') _) -> pure [i']
@@ -264,39 +254,18 @@ controlInteger i op ctrl = case op of
         let bitSet = testBit n 0
             allowed = not bitSet || IS.member idx indices
          in allowed && go indices (shiftR n 1) (idx + 1)
-  Lt -> case ctrl of
-    Literal (Value (VUInt i') _) -> verdict $ i < fromIntegral i'
-    Literal (Value (VNInt i') _) -> verdict $ i < -fromIntegral i'
-    Literal (Value (VBignum i') _) -> verdict $ i < i'
-    _ -> verdict False
-  Gt -> case ctrl of
-    Literal (Value (VUInt i') _) -> verdict $ i > fromIntegral i'
-    Literal (Value (VNInt i') _) -> verdict $ i > -fromIntegral i'
-    Literal (Value (VBignum i') _) -> verdict $ i > i'
-    _ -> verdict False
-  Le -> case ctrl of
-    Literal (Value (VUInt i') _) -> verdict $ i <= fromIntegral i'
-    Literal (Value (VNInt i') _) -> verdict $ i <= -fromIntegral i'
-    Literal (Value (VBignum i') _) -> verdict $ i <= i'
-    _ -> verdict False
-  Ge -> case ctrl of
-    Literal (Value (VUInt i') _) -> verdict $ i >= fromIntegral i'
-    Literal (Value (VNInt i') _) -> verdict $ i >= -fromIntegral i'
-    Literal (Value (VBignum i') _) -> verdict $ i >= i'
-    _ -> verdict False
-  Eq -> case ctrl of
-    Literal (Value (VUInt i') _) -> verdict $ i == fromIntegral i'
-    Literal (Value (VNInt i') _) -> verdict $ i == -fromIntegral i'
-    Literal (Value (VBignum i') _) -> verdict $ i == i'
-    _ -> verdict False
-  Ne -> case ctrl of
-    Literal (Value (VUInt i') _) -> verdict $ i /= fromIntegral i'
-    Literal (Value (VNInt i') _) -> verdict $ i /= -fromIntegral i'
-    Literal (Value (VBignum i') _) -> verdict $ i /= i'
-    _ -> verdict False
+  Lt -> verdictOnControl (i <)
+  Gt -> verdictOnControl (i >)
+  Le -> verdictOnControl (i <=)
+  Ge -> verdictOnControl (i >=)
+  Eq -> verdictOnControl (i ==)
+  Ne -> verdictOnControl (i /=)
   _ -> error $ "unexpected control: " <> showSimple ctrl
   where
     verdict = controlVerdict op ctrl
+    verdictOnControl f = do
+      x <- expectWellFormed <$> evalInteger ctrl
+      verdict $ f x
 
 --------------------------------------------------------------------------------
 -- Floating point (Float16, Float32, Float64)
@@ -319,18 +288,17 @@ validateHalf f rule =
     -- a = float16
     Postlude PTHalf -> accept rule
     -- a = 0.5
-    Literal (Value (VFloat16 f') _) | f == f' -> accept rule
+    Literal _ -> do
+      x <- evalDouble rule
+      ruleVerdict rule $ x == Just (float2Double f)
     -- a = foo / bar
     Choice opts -> validateChoice (validateHalf f) opts
     -- a = foo .ctrl bar
     Control op tgt ctrl -> validateHalf f tgt >> controlHalf f op ctrl
     -- a = x..y
-    Range (CTreeE (VRuleRef n)) high bound -> do
-      dereferenceNoTrace n $ \lo -> validateHalf f $ Range lo high bound
-    Range low (CTreeE (VRuleRef n)) bound -> do
-      dereferenceNoTrace n $ \hi -> validateHalf f $ Range low hi bound
-    Range (Literal (Value (VFloat16 n) _)) (Literal (Value (VFloat16 m) _)) bound
-      | n <= f && range bound f m -> accept rule
+    Range {} -> do
+      interval <- expectWellFormed <$> evalInterval evalDouble rule
+      ruleVerdict rule $ Interval.contains interval $ float2Double f
     _ -> reject rule
 
 -- | Controls for `Float16`
@@ -341,16 +309,19 @@ controlHalf ::
   CTree ValidatorPhase ->
   Validator ()
 controlHalf f op (CTreeE (VRuleRef n)) = dereferenceNoTrace n $ controlHalf f op
-controlHalf f op ctrl = case op of
-  Eq -> case ctrl of
-    Literal (Value (VFloat16 f') _) -> verdict $ f == f'
-    _ -> verdict False
-  Ne -> case ctrl of
-    Literal (Value (VFloat16 f') _) -> verdict $ f /= f'
-    _ -> verdict False
+controlHalf (float2Double -> v) op ctrl = case op of
+  Lt -> verdictOnControl (v <)
+  Gt -> verdictOnControl (v >)
+  Le -> verdictOnControl (v <=)
+  Ge -> verdictOnControl (v >=)
+  Eq -> verdictOnControl (v ==)
+  Ne -> verdictOnControl (v /=)
   _ -> error $ "Not yet implemented for half: " <> show op
   where
     verdict = controlVerdict op ctrl
+    verdictOnControl f = do
+      x <- expectWellFormed <$> evalDouble ctrl
+      verdict $ f x
 
 -- | Validating a `Float32`
 validateFloat ::
@@ -367,27 +338,17 @@ validateFloat f rule =
     -- a = float32
     Postlude PTFloat -> accept rule
     -- a = 0.000000005
-    -- TODO: it is unclear if smaller floats should also validate
-    Literal (Value (VFloat32 f') _) | f == f' -> accept rule
+    Literal _ -> do
+      x <- evalDouble rule
+      ruleVerdict rule $ x == Just (float2Double f)
     -- a = foo / bar
     Choice opts -> validateChoice (validateFloat f) opts
     -- a = foo .ctrl bar
     Control op tgt ctrl -> validateFloat f tgt >> controlFloat f op ctrl
     -- a = x..y
-    -- TODO it is unclear if this should mix floating point types too
-    Range (CTreeE (VRuleRef n)) high bound ->
-      dereferenceNoTrace n $ \lo -> validateFloat f $ Range lo high bound
-    Range low (CTreeE (VRuleRef n)) bound ->
-      dereferenceNoTrace n $ \hi -> validateFloat f $ Range low hi bound
-    Range (Literal (Value nv _)) (Literal (Value mv _)) bound
-      | VFloat16 n <- nv
-      , VFloat16 m <- mv
-      , n <= f && range bound f m ->
-          accept rule
-      | VFloat32 n <- nv
-      , VFloat32 m <- mv
-      , n <= f && range bound f m ->
-          accept rule
+    Range {} -> do
+      interval <- expectWellFormed <$> evalInterval evalDouble rule
+      ruleVerdict rule $ Interval.contains interval $ float2Double f
     _ -> reject rule
 
 -- | Controls for `Float32`
@@ -398,18 +359,19 @@ controlFloat ::
   CTree ValidatorPhase ->
   Validator ()
 controlFloat f op (CTreeE (VRuleRef n)) = dereferenceNoTrace n $ controlFloat f op
-controlFloat f op ctrl = case op of
-  Eq -> case ctrl of
-    Literal (Value (VFloat16 f') _) -> verdict $ f == f'
-    Literal (Value (VFloat32 f') _) -> verdict $ f == f'
-    _ -> verdict False
-  Ne -> case ctrl of
-    Literal (Value (VFloat16 f') _) -> verdict $ f /= f'
-    Literal (Value (VFloat32 f') _) -> verdict $ f /= f'
-    _ -> verdict False
-  _ -> error $ "Not yet implemented for float: " <> show op
+controlFloat (float2Double -> v) op ctrl = case op of
+  Lt -> verdictOnControl (v <)
+  Gt -> verdictOnControl (v >)
+  Le -> verdictOnControl (v <=)
+  Ge -> verdictOnControl (v >=)
+  Eq -> verdictOnControl (v ==)
+  Ne -> verdictOnControl (v /=)
+  _ -> error $ "Not yet implemented for half: " <> show op
   where
     verdict = controlVerdict op ctrl
+    verdictOnControl f = do
+      x <- expectWellFormed <$> evalDouble ctrl
+      verdict $ f x
 
 -- | Validating a `Float64`
 validateDouble ::
@@ -434,23 +396,7 @@ validateDouble f rule =
     Control op tgt ctrl -> validateDouble f tgt >> controlDouble f op ctrl
     -- a = x..y
     -- TODO it is unclear if this should mix floating point types too
-    Range (CTreeE (VRuleRef n)) high bound ->
-      dereferenceNoTrace n $ \lo -> validateDouble f $ Range lo high bound
-    Range low (CTreeE (VRuleRef n)) bound ->
-      dereferenceNoTrace n $ \hi -> validateDouble f $ Range low hi bound
-    Range (Literal (Value nv _)) (Literal (Value mv _)) bound
-      | VFloat16 n <- nv
-      , VFloat16 m <- mv
-      , float2Double n <= f && range bound f (float2Double m) ->
-          accept rule
-      | VFloat32 n <- nv
-      , VFloat32 m <- mv
-      , float2Double n <= f && range bound f (float2Double m) ->
-          accept rule
-      | VFloat64 n <- nv
-      , VFloat64 m <- mv
-      , n <= f && range bound f m ->
-          accept rule
+    Range {} -> validateRange f rule evalDouble
     _ -> reject rule
 
 -- | Controls for `Float64`
@@ -460,27 +406,23 @@ controlDouble ::
   CtlOp ->
   CTree ValidatorPhase ->
   Validator ()
-controlDouble f op (CTreeE (VRuleRef n)) = dereferenceNoTrace n $ controlDouble f op
-controlDouble f op ctrl = case op of
-  Eq -> case ctrl of
-    Literal (Value (VFloat16 f') _) -> verdict $ f == float2Double f'
-    Literal (Value (VFloat32 f') _) -> verdict $ f == float2Double f'
-    Literal (Value (VFloat64 f') _) -> verdict $ f == f'
-    _ -> verdict False
-  Ne -> case ctrl of
-    Literal (Value (VFloat16 f') _) -> verdict $ f /= float2Double f'
-    Literal (Value (VFloat32 f') _) -> verdict $ f /= float2Double f'
-    Literal (Value (VFloat64 f') _) -> verdict $ f /= f'
-    _ -> verdict False
+controlDouble v op (CTreeE (VRuleRef n)) = dereferenceNoTrace n $ controlDouble v op
+controlDouble v op ctrl = case op of
+  Eq -> verdictOnControl (v ==)
+  Ne -> verdictOnControl (v /=)
   _ -> error $ "Not yet implmented for double: " <> show op
   where
     verdict = controlVerdict op ctrl
+    verdictOnControl f = do
+      x <- expectWellFormed <$> evalDouble ctrl
+      verdict $ f x
 
 --------------------------------------------------------------------------------
 -- Bool
 
 -- | Validating a boolean
 validateBool ::
+  HasCallStack =>
   Bool ->
   CTree ValidatorPhase ->
   Validator ()
@@ -493,7 +435,9 @@ validateBool b rule =
     -- a = bool
     Postlude PTBool -> accept rule
     -- a = true
-    Literal (Value (VBool b') _) | b == b' -> accept rule
+    Literal _ -> do
+      x <- evalBool rule
+      ruleVerdict rule $ x == Just b
     -- a = foo .ctrl bar
     Control op tgt ctrl -> validateBool b tgt >> controlBool b op ctrl
     -- a = foo / bar
@@ -509,15 +453,14 @@ controlBool ::
   Validator ()
 controlBool b op (CTreeE (VRuleRef n)) = dereferenceNoTrace n $ controlBool b op
 controlBool b op ctrl = case op of
-  Eq -> case ctrl of
-    Literal (Value (VBool b') _) -> verdict $ b == b'
-    _ -> verdict False
-  Ne -> case ctrl of
-    Literal (Value (VBool b') _) -> verdict $ b /= b'
-    _ -> verdict False
+  Eq -> verdictOnControl (b ==)
+  Ne -> verdictOnControl (b /=)
   _ -> error $ "Not yet implemented for bool: " <> show op
   where
     verdict = controlVerdict op ctrl
+    verdictOnControl f = do
+      x <- expectWellFormed <$> evalBool ctrl
+      verdict $ f x
 
 --------------------------------------------------------------------------------
 -- Simple
@@ -562,6 +505,7 @@ validateNull rule =
 
 -- | Validating a byte sequence
 validateBytes ::
+  HasCallStack =>
   BS.ByteString ->
   CTree ValidatorPhase ->
   Validator ()
@@ -574,7 +518,9 @@ validateBytes bs rule =
     -- a = bytes
     Postlude PTBytes -> accept rule
     -- a = h'123456'
-    Literal (Value (VBytes bs') _) | bs == bs' -> accept rule
+    Literal _ -> do
+      x <- evalBytes rule
+      ruleVerdict rule $ x == Just bs
     -- a = foo .ctrl bar
     Control op tgt ctrl -> validateBytes bs tgt >> controlBytes bs op ctrl
     -- a = foo / bar
@@ -590,23 +536,7 @@ controlBytes ::
   Validator ()
 controlBytes bs op (CTreeE (VRuleRef n)) = dereferenceNoTrace n $ controlBytes bs op
 controlBytes bs op ctrl = case op of
-  Size -> case ctrl of
-    Literal (Value (VUInt sz) _) | fromIntegral (BS.length bs) == sz -> verdict True
-    Range (CTreeE (VRuleRef n)) high bound ->
-      dereferenceNoTrace n $ \lo -> controlBytes bs op $ Range lo high bound
-    Range low (CTreeE (VRuleRef n)) bound -> do
-      dereferenceNoTrace n $ \hi -> controlBytes bs op $ Range low hi bound
-    Range low high bound ->
-      let i = BS.length bs
-       in case (low, high) of
-            (Literal (Value (VUInt (fromIntegral -> n)) _), Literal (Value (VUInt (fromIntegral -> m)) _))
-              | boundPlacement i (Just n, Just m) bound == WithinBounds -> verdict True
-            (Literal (Value (VNInt (fromIntegral -> n)) _), Literal (Value (VUInt (fromIntegral -> m)) _))
-              | boundPlacement i (Just $ -n, Just m) bound == WithinBounds -> verdict True
-            (Literal (Value (VNInt (fromIntegral -> n)) _), Literal (Value (VNInt (fromIntegral -> m)) _))
-              | boundPlacement i (Just $ -n, Just $ -m) bound == WithinBounds -> verdict True
-            _ -> verdict False
-    _ -> verdict False
+  Size -> validateRange (toInteger $ BS.length bs) ctrl evalInteger
   Bits -> do
     indices <-
       case ctrl of
@@ -643,6 +573,7 @@ controlBytes bs op ctrl = case op of
 
 -- | Validating text strings
 validateText ::
+  HasCallStack =>
   T.Text ->
   CTree ValidatorPhase ->
   Validator ()
@@ -655,7 +586,9 @@ validateText txt rule =
     -- a = text
     Postlude PTText -> accept rule
     -- a = "foo"
-    Literal (Value (VText txt') _) | txt == txt' -> accept rule
+    Literal {} -> do
+      x <- evalText rule
+      ruleVerdict rule $ x == Just txt
     -- a = foo .ctrl bar
     Control op tgt ctrl -> validateText txt tgt >> controlText txt op ctrl
     -- a = foo / bar
@@ -671,24 +604,7 @@ controlText ::
   Validator ()
 controlText bs op (CTreeE (VRuleRef n)) = dereferenceNoTrace n $ controlText bs op
 controlText bs op ctrl = case op of
-  Size ->
-    let bsSize = BS.length $ encodeUtf8 bs
-     in case ctrl of
-          Literal (Value (VUInt (fromIntegral -> sz)) _) -> verdict $ bsSize == sz
-          Range (CTreeE (VRuleRef n)) high bound ->
-            dereferenceNoTrace n $ \lo -> controlText bs op $ Range lo high bound
-          Range low (CTreeE (VRuleRef n)) bound ->
-            dereferenceNoTrace n $ \hi -> controlText bs op $ Range low hi bound
-          Range ff tt bound ->
-            case (ff, tt) of
-              (Literal (Value (VUInt (fromIntegral -> n)) _), Literal (Value (VUInt (fromIntegral -> m)) _)) ->
-                verdict $ n <= T.length bs && range bound bsSize m
-              (Literal (Value (VNInt (fromIntegral -> n)) _), Literal (Value (VUInt (fromIntegral -> m)) _)) ->
-                verdict $ -n <= T.length bs && range bound bsSize m
-              (Literal (Value (VNInt (fromIntegral -> n)) _), Literal (Value (VNInt (fromIntegral -> m)) _)) ->
-                verdict $ -n <= T.length bs && range bound bsSize (-m)
-              _ -> verdict False
-          _ -> error "Invalid control value in .size"
+  Size -> validateRange (toInteger $ lengthWord8 bs) ctrl evalInteger
   Regexp -> case ctrl of
     Literal (Value (VText rxp) _) -> case bs =~ rxp :: (T.Text, T.Text, T.Text) of
       ("", bs', "") -> verdict $ bs == bs'
@@ -722,21 +638,6 @@ validateTagged tag term rule =
 
 -- --------------------------------------------------------------------------------
 -- -- Lists
-
-data BoundPlacement
-  = BelowBounds
-  | WithinBounds
-  | AboveBounds
-  deriving (Eq, Ord, Show)
-
-boundPlacement :: Ord a => a -> (Maybe a, Maybe a) -> RangeBound -> BoundPlacement
-boundPlacement _ (Nothing, Nothing) _ = WithinBounds
-boundPlacement x (Just lo, mHi) bounds
-  | lo > x = BelowBounds
-  | otherwise = boundPlacement x (Nothing, mHi) bounds
-boundPlacement x (Nothing, Just hi) bounds
-  | range bounds x hi = WithinBounds
-  | otherwise = AboveBounds
 
 clampedPred :: (Eq a, Num a, Enum a) => a -> a
 clampedPred 0 = 0
@@ -990,6 +891,10 @@ dereference n = withRef n . dereferenceNoTrace n
 --------------------------------------------------------------------------------
 -- Utils
 
-range :: Ord a => RangeBound -> a -> a -> Bool
-range Closed = (<=)
-range ClOpen = (<)
+expectWellFormed :: HasCallStack => Maybe a -> a
+expectWellFormed (Just x) = x
+expectWellFormed Nothing = error "Rules are not well-formed"
+
+ruleVerdict :: CTree ValidatorPhase -> Bool -> Validator ()
+ruleVerdict rule True = accept rule
+ruleVerdict rule False = reject rule

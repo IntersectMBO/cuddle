@@ -1,9 +1,0 @@
-array
-└ app: [0;92m0[0m
-  ref: [0;94mbar[0m
-  └ [0;91mfailed to apply required rule:[0m
-    └ array
-      └ app: [0;92m1[0m
-        app: [0;92m2[0m
-        app: [0;92m3[0m
-        [0;91mleftover elements not matched by any rule[0m
