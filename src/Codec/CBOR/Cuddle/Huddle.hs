@@ -100,6 +100,7 @@ module Codec.CBOR.Cuddle.Huddle (
 
   -- * Validators
   withValidator,
+  withOverrideValidator,
 
   -- * Name
   HasName (..),
