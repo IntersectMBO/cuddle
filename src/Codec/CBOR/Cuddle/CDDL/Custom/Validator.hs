@@ -59,7 +59,7 @@ import Codec.CBOR.Cuddle.CBOR.Canonical (CanonicalTerm)
 import Codec.CBOR.Cuddle.CDDL (GRef (..), Name (..))
 import Codec.CBOR.Cuddle.CDDL.CTree (CTree (..), CTreeRoot (..), XXCTree (..), foldCTree)
 import Codec.CBOR.Cuddle.CDDL.CtlOp (CtlOp)
-import Codec.CBOR.Cuddle.CDDL.Custom.Core (MonadCddl (..), RuleTerm)
+import Codec.CBOR.Cuddle.CDDL.Custom.Core (MonadCddl (..))
 import Codec.CBOR.Cuddle.CDDL.Phase (MonoSimplePhase)
 import Codec.CBOR.Cuddle.IndexMappable (IndexMappable (..))
 import Codec.CBOR.Term (Term)
@@ -98,10 +98,10 @@ type data ValidatorPhase
 
 data instance XXCTree ValidatorPhase
   = VRuleRef Name
-  | VValidator TermValidator (CTree ValidatorPhase)
+  | VValidator (TermValidator -> TermValidator) (CTree ValidatorPhase)
 
 class HasValidator a where
-  validatorL :: Lens' a (Maybe TermValidator)
+  validatorL :: Lens' a (TermValidator -> TermValidator)
 
 data ValidateEnv = ValidateEnv
   { veRoot :: CTreeRoot ValidatorPhase
@@ -115,7 +115,7 @@ newtype ValidatorT (b :: Block) a
 
 type Validator = ValidatorT TermBlock
 
-type TermValidator = RuleTerm -> Validator ()
+type TermValidator = Term -> Validator ()
 
 instance MonadCddl (ValidatorT b) where
   type Phase (ValidatorT b) = ValidatorPhase

@@ -17,7 +17,7 @@ import Codec.CBOR.Cuddle.CBOR.Canonical (toCanonical)
 import Codec.CBOR.Cuddle.CDDL hiding (CDDL, Group, Rule)
 import Codec.CBOR.Cuddle.CDDL.CTree
 import Codec.CBOR.Cuddle.CDDL.CtlOp
-import Codec.CBOR.Cuddle.CDDL.Custom.Core (MonadCddl (..), RuleTerm (..))
+import Codec.CBOR.Cuddle.CDDL.Custom.Core (MonadCddl (..))
 import Codec.CBOR.Cuddle.CDDL.Custom.Validator
 import Codec.CBOR.Cuddle.CDDL.Phase (MonoSimplePhase, showSimple)
 import Codec.CBOR.Cuddle.IndexMappable (IndexMappable (..))
@@ -88,6 +88,13 @@ validateFromGRef ref term = do
     Nothing -> fail $ "Unbound generic reference: " <> show ref
     Just rule -> validateTerm term rule
 
+applyCustomValidator ::
+  (TermValidator -> TermValidator) ->
+  CTree ValidatorPhase ->
+  Term ->
+  Validator ()
+applyCustomValidator f x = f (`validateTerm` x)
+
 --------------------------------------------------------------------------------
 -- Terms
 
@@ -99,7 +106,7 @@ validateTerm ::
   Validator ()
 validateTerm term rule
   | CTreeE (VRuleRef n) <- rule = dereference n $ validateTerm term
-  | CTreeE (VValidator validator _) <- rule = validator $ SingleTerm term
+  | CTreeE (VValidator f x) <- rule = applyCustomValidator f x term
   | otherwise =
       case term of
         TInt i -> validateInteger (fromIntegral i) rule
@@ -142,7 +149,7 @@ validateInteger ::
 validateInteger i rule =
   case rule of
     CTreeE (VRuleRef n) -> dereference n $ validateInteger i
-    CTreeE (VValidator validator _) -> validator $ SingleTerm $ TInteger i
+    CTreeE (VValidator f x) -> f (`validateTerm` x) $ TInteger i
     -- echo "C24101" | xxd -r -p - example.cbor
     -- echo "foo = int" > a.cddl
     -- cddl a.cddl validate example.cbor
@@ -304,7 +311,7 @@ validateHalf ::
   CTree ValidatorPhase ->
   Validator ()
 validateHalf f (CTreeE (VRuleRef n)) = dereference n $ validateHalf f
-validateHalf f (CTreeE (VValidator v _)) = v $ SingleTerm $ THalf f
+validateHalf f (CTreeE (VValidator v x)) = applyCustomValidator v x $ THalf f
 validateHalf f rule =
   case rule of
     -- a = any
@@ -352,7 +359,7 @@ validateFloat ::
   CTree ValidatorPhase ->
   Validator ()
 validateFloat f (CTreeE (VRuleRef n)) = dereference n $ validateFloat f
-validateFloat f (CTreeE (VValidator v _)) = v $ SingleTerm $ TFloat f
+validateFloat f (CTreeE (VValidator v x)) = applyCustomValidator v x $ TFloat f
 validateFloat f rule =
   case rule of
     -- a = any
@@ -411,7 +418,7 @@ validateDouble ::
   CTree ValidatorPhase ->
   Validator ()
 validateDouble f (CTreeE (VRuleRef n)) = dereference n $ validateDouble f
-validateDouble f (CTreeE (VValidator v _)) = v $ SingleTerm $ TDouble f
+validateDouble f (CTreeE (VValidator v x)) = applyCustomValidator v x $ TDouble f
 validateDouble f rule =
   case rule of
     -- a = any
@@ -478,7 +485,7 @@ validateBool ::
   CTree ValidatorPhase ->
   Validator ()
 validateBool b (CTreeE (VRuleRef n)) = dereference n $ validateBool b
-validateBool b (CTreeE (VValidator v _)) = v $ SingleTerm $ TBool b
+validateBool b (CTreeE (VValidator v x)) = applyCustomValidator v x $ TBool b
 validateBool b rule =
   case rule of
     -- a = any
@@ -521,7 +528,7 @@ validateSimple ::
   CTree ValidatorPhase ->
   Validator ()
 validateSimple i (CTreeE (VRuleRef n)) = dereference n $ validateSimple i
-validateSimple i (CTreeE (VValidator v _)) = v $ SingleTerm $ TSimple i
+validateSimple i (CTreeE (VValidator v x)) = applyCustomValidator v x $ TSimple i
 validateSimple 23 rule =
   case rule of
     -- a = any
@@ -540,7 +547,7 @@ validateSimple n _ = error $ "Found simple different to 23! please report this s
 validateNull ::
   CTree ValidatorPhase -> Validator ()
 validateNull (CTreeE (VRuleRef n)) = dereference n validateNull
-validateNull (CTreeE (VValidator v _)) = v $ SingleTerm TNull
+validateNull (CTreeE (VValidator v x)) = applyCustomValidator v x TNull
 validateNull rule =
   case rule of
     -- a = any
@@ -559,7 +566,7 @@ validateBytes ::
   CTree ValidatorPhase ->
   Validator ()
 validateBytes bs (CTreeE (VRuleRef n)) = dereference n $ validateBytes bs
-validateBytes bs (CTreeE (VValidator v _)) = v $ SingleTerm $ TBytes bs
+validateBytes bs (CTreeE (VValidator v x)) = applyCustomValidator v x $ TBytes bs
 validateBytes bs rule =
   case rule of
     -- a = any
@@ -640,7 +647,7 @@ validateText ::
   CTree ValidatorPhase ->
   Validator ()
 validateText txt (CTreeE (VRuleRef n)) = dereference n $ validateText txt
-validateText txt (CTreeE (VValidator v _)) = v $ SingleTerm $ TString txt
+validateText txt (CTreeE (VValidator v x)) = applyCustomValidator v x $ TString txt
 validateText txt rule =
   case rule of
     -- a = any
@@ -701,7 +708,7 @@ validateTagged ::
   CTree ValidatorPhase ->
   Validator ()
 validateTagged tag term (CTreeE (VRuleRef n)) = dereference n $ validateTagged tag term
-validateTagged tag term (CTreeE (VValidator v _)) = v $ SingleTerm $ TTagged tag term
+validateTagged tag term (CTreeE (VValidator v x)) = applyCustomValidator v x $ TTagged tag term
 validateTagged tag term rule =
   case rule of
     Postlude PTAny -> accept rule
@@ -763,8 +770,8 @@ validateListBlock terms rules = do
     matchSingle r [] = failWith $ ArrayLeftoverRule $ mapIndex r
     matchSingle r (t : ts) = case r of
       CTreeE (VRuleRef n) -> dereference n $ \ref -> matchSingle ref (t : ts)
-      CTreeE (VValidator v _) -> do
-        element $ v $ SingleTerm t
+      CTreeE (VValidator v x) -> do
+        element $ applyCustomValidator v x t
         pure ts
       KV _ v _ -> matchSingle v (t : ts)
       Group rs -> matchSeq rs (t : ts)
@@ -811,7 +818,7 @@ validateList ::
   CTree ValidatorPhase ->
   Validator ()
 validateList terms (CTreeE (VRuleRef n)) = dereference n $ validateList terms
-validateList terms (CTreeE (VValidator v _)) = v $ SingleTerm $ TList terms
+validateList terms (CTreeE (VValidator v x)) = applyCustomValidator v x $ TList terms
 validateList terms rule =
   case rule of
     Postlude PTAny -> accept rule
@@ -905,7 +912,7 @@ validateMap ::
   CTree ValidatorPhase ->
   Validator ()
 validateMap terms (CTreeE (VRuleRef n)) = dereference n $ validateMap terms
-validateMap terms (CTreeE (VValidator v _)) = v $ SingleTerm $ TMap terms
+validateMap terms (CTreeE (VValidator v x)) = applyCustomValidator v x $ TMap terms
 validateMap terms rule =
   case rule of
     Postlude PTAny -> accept rule

@@ -350,7 +350,7 @@ tagRangeExample =
             _ -> error "tagRangeExample: generic argument must be a single term"
 
         validator x = \case
-          SingleTerm (C.TTagged t inner)
+          C.TTagged t inner
             | t >= 1280 && t <= 1400 -> validateFromGRef x inner
             | otherwise -> fail $ "Tag out of range 1280..1400: " <> show t
           wt -> fail $ "Expected a tagged term, got: " <> show wt

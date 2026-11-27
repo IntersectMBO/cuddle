@@ -171,7 +171,7 @@ newtype instance C.XCddl HuddleStage = HuddleXCddl [C.Comment]
 data instance C.XRule HuddleStage = HuddleXRule
   { hxrComment :: C.Comment
   , hxrGenerator :: TermGenerator RuleTerm -> TermGenerator RuleTerm
-  , hxrValidator :: Maybe TermValidator
+  , hxrValidator :: TermValidator -> TermValidator
   }
   deriving (Generic)
 
@@ -185,7 +185,7 @@ instance HasGenerator (C.XRule HuddleStage) where
   generatorL = #hxrGenerator
 
 instance Default (XRule HuddleStage) where
-  def = HuddleXRule def id def
+  def = HuddleXRule def id id
 
 newtype instance C.XXTopLevel HuddleStage = HuddleXXTopLevel C.Comment
   deriving (Generic, Semigroup, Monoid, Show, Eq)
@@ -1162,7 +1162,7 @@ collectFrom topRs =
     goRanged (Unranged _) = pure ()
     goRanged (Ranged lb ub _) = goRangeBound lb >> goRangeBound ub
     goRangeBound (RangeBoundLiteral _) = pure ()
-    goRangeBound (RangeBoundRef n r) = goRule . Rule n r $ HuddleXRule mempty id Nothing
+    goRangeBound (RangeBoundRef n r) = goRule . Rule n r $ HuddleXRule mempty id id
 
 -- | Same as `collectFrom`, but the rules passed into this function will be put
 --   at the top of the Huddle, and all of their dependencies will be added at
@@ -1396,7 +1396,10 @@ withOverrideCBORGen :: HasGenerator a => (CBORGen RuleTerm -> CBORGen RuleTerm) 
 withOverrideCBORGen f = withOverrideGenerator $ simpleGen . f . tgGenerator
 
 withValidator :: HasValidator a => TermValidator -> a -> a
-withValidator p = L.set validatorL $ Just p
+withValidator p = withOverrideValidator $ const p
+
+withOverrideValidator :: HasValidator a => (TermValidator -> TermValidator) -> a -> a
+withOverrideValidator = L.set validatorL
 
 -- * IndexMappable
 

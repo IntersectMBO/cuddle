@@ -20,7 +20,6 @@ import Codec.CBOR.Cuddle.CBOR.Validator (
 import Codec.CBOR.Cuddle.CDDL (Name (..), mapCDDLDropExt)
 import Codec.CBOR.Cuddle.CDDL.CTree (CTreeRoot (..))
 import Codec.CBOR.Cuddle.CDDL.CTree qualified as CTree
-import Codec.CBOR.Cuddle.CDDL.Custom.Core (RuleTerm (..))
 import Codec.CBOR.Cuddle.CDDL.Custom.Generator (GenConfig (..), runCBORGen)
 import Codec.CBOR.Cuddle.CDDL.Custom.Validator (
   Block (..),
@@ -298,13 +297,13 @@ expectInvalid (Evidenced SValid t) =
 expectInvalid _ = pure ()
 
 stringValidator :: TermValidator
-stringValidator (SingleTerm (TString _)) = pure ()
-stringValidator (SingleTerm (TStringI _)) = pure ()
+stringValidator (TString _) = pure ()
+stringValidator (TStringI _) = pure ()
 stringValidator t = fail $ "Expected a string, got\n" <> show t
 
 bytesValidator :: TermValidator
-bytesValidator (SingleTerm (TBytes _)) = pure ()
-bytesValidator (SingleTerm (TBytesI _)) = pure ()
+bytesValidator (TBytes _) = pure ()
+bytesValidator (TBytesI _) = pure ()
 bytesValidator t = fail $ "Expected bytes, got\n" <> show t
 
 spec :: Spec
